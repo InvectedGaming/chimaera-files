@@ -30,7 +30,8 @@ const shortcutGroups: ShortcutGroup[] = [
     title: "Preview",
     shortcuts: [
       { keys: "Space", description: "Open / close preview" },
-      { keys: "↑ / ↓ in preview", description: "Cycle through files" },
+      { keys: "↑ / ↓ in preview", description: "Scroll preview content" },
+      { keys: "Shift + ↑ / ↓ in preview", description: "Cycle through files" },
       { keys: "E", description: "Edit file (text files)" },
       { keys: "Ctrl + Space", description: "Open with default app" },
       { keys: "Ctrl + Shift + Space", description: "Open with... dialog" },

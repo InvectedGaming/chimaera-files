@@ -38,13 +38,11 @@ export const ListItem = memo(function ListItem({
   const animated = useAnimations();
   const [dragOverState, setDragOverState] = useState(false);
 
-  const bg = selected
-    ? "rgba(255,255,255,0.1)"
-    : active
-      ? "rgba(255,255,255,0.08)"
-      : dragOverState
-        ? "rgba(255,255,255,0.12)"
-        : undefined;
+  const bg = active
+    ? "rgba(255,255,255,0.08)"
+    : dragOverState
+      ? "rgba(255,255,255,0.12)"
+      : undefined;
 
   return (
     <div
@@ -85,18 +83,6 @@ export const ListItem = memo(function ListItem({
       onDoubleClick={onDoubleClick}
       onAuxClick={onAuxClick}
     >
-      {/* Selection accent bar */}
-      {selected && (
-        <div style={{
-          position: "absolute",
-          left: "2px",
-          top: "25%",
-          bottom: "25%",
-          width: "3px",
-          borderRadius: "2px",
-          background: "#60cdff",
-        }} />
-      )}
       {children}
     </div>
   );

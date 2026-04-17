@@ -37,7 +37,22 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
   const [dirty, setDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [rawView, setRawView] = useState(false);
+  const [escWarning, setEscWarning] = useState(false);
+  const editingRef = useRef(false);
+  const escWarningRef = useRef(false);
+  const dirtyRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  const handleStartEditingRef = useRef<() => void>(() => {});
+  const animateCloseRef = useRef<() => void>(() => {});
+  const isTextRef = useRef(false);
+  const textContentRef = useRef<string | null>(null);
+
+  // Keep refs in sync
+  editingRef.current = editing;
+  escWarningRef.current = escWarning;
+  dirtyRef.current = dirty;
   // Phases: backdrop-in → modal-in → (visible) → modal-out → backdrop-out → unmount
   const [phase, setPhase] = useState<"backdrop-in" | "modal-in" | "visible" | "modal-out" | "backdrop-out">("backdrop-in");
 
@@ -61,14 +76,39 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
   useEffect(() => {
     requestAnimationFrame(() => {
       setPhase("modal-in");
+      contentRef.current?.focus();
       setTimeout(() => setPhase("visible"), 150);
     });
   }, []);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (editing) return; // Let textarea handle its own keys
+      // When editing, handle Escape here (window level catches it before textarea)
+      if (editingRef.current) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          if (dirtyRef.current && !escWarningRef.current) {
+            setEscWarning(true);
+            return;
+          }
+          // Exit edit mode back to preview
+          setEditing(false);
+          setEditedContent(textContent ?? "");
+          setDirty(false);
+          setEscWarning(false);
+          setTimeout(() => contentRef.current?.focus(), 50);
+          return;
+        }
+        // Clear warning on any other key
+        if (escWarningRef.current && e.key !== "Escape") {
+          setEscWarning(false);
+        }
+        // Let textarea handle all other keys
+        return;
+      }
 
+      // Not editing — normal preview shortcuts
       // Ctrl+Shift+Space: "Open with" dialog
       if (e.ctrlKey && e.shiftKey && e.key === " ") {
         e.preventDefault();
@@ -82,20 +122,38 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
         return;
       }
       // E: start editing (text files only)
-      if (e.key === "e" && isText && textContent !== null) {
+      if (e.key === "e" && isTextRef.current && textContentRef.current !== null) {
         e.preventDefault();
-        handleStartEditing();
+        handleStartEditingRef.current();
         return;
       }
+      // Shift+Arrow: cycle files
+      if (e.shiftKey && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+        e.preventDefault();
+        e.stopPropagation();
+        window.dispatchEvent(new CustomEvent("preview-cycle", {
+          detail: { direction: e.key === "ArrowDown" ? "down" : "up" },
+        }));
+        return;
+      }
+
+      // Arrow keys, Page, Home, End: let browser scroll the focused content div naturally
+      if (["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End"].includes(e.key)) {
+        e.stopPropagation(); // Stop App.tsx from handling
+        // Don't preventDefault — let the browser scroll the focused contentRef
+        return;
+      }
+
       // Space or Escape: close
       if (e.key === "Escape" || e.key === " ") {
         e.preventDefault();
-        animateClose();
+        e.stopPropagation();
+        animateCloseRef.current();
       }
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [animateClose, editing, path]);
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, []); // Empty deps — all values read from refs
 
   useEffect(() => {
     getFileMetadata(path).then(setMeta).catch(() => {});
@@ -124,10 +182,31 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
   }, [path, editedContent]);
 
   const handleStartEditing = useCallback(() => {
+    // Capture scroll position before switching to editor
+    const scrollTop = contentRef.current?.scrollTop ?? 0;
     setEditing(true);
     setEditedContent(textContent ?? "");
-    setTimeout(() => textareaRef.current?.focus(), 50);
+    setTimeout(() => {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        // Restore scroll position
+        textareaRef.current.scrollTop = scrollTop;
+        // Place cursor at approximate position based on scroll
+        const lineHeight = 19.2; // 12px font * 1.6 line-height
+        const approxLine = Math.floor(scrollTop / lineHeight);
+        const lines = (textContent ?? "").split("\n");
+        let charPos = 0;
+        for (let i = 0; i < Math.min(approxLine, lines.length); i++) {
+          charPos += lines[i].length + 1;
+        }
+        textareaRef.current.setSelectionRange(charPos, charPos);
+      }
+    }, 50);
   }, [textContent]);
+  handleStartEditingRef.current = handleStartEditing;
+  animateCloseRef.current = animateClose;
+  isTextRef.current = isText;
+  textContentRef.current = textContent;
 
   const backdropVisible = phase !== "backdrop-in" && phase !== "backdrop-out";
   const modalVisible = phase === "visible" || phase === "modal-in";
@@ -186,7 +265,7 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
             border: "1px solid rgba(255,255,255,0.08)",
             width: "75%",
             maxWidth: "900px",
-            maxHeight: "85vh",
+            height: "80vh",
             display: "flex",
             flexDirection: "column",
             overflow: "hidden",
@@ -262,7 +341,17 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
           </div>
 
           {/* Content */}
-          <div style={{ flex: 1, overflow: "auto", display: "flex", alignItems: "flex-start", justifyContent: "center" }}>
+          <div
+            ref={contentRef}
+            tabIndex={0}
+            style={{
+              flex: 1,
+              overflow: editing ? "hidden" : "auto",
+              outline: "none",
+              position: "relative",
+              minHeight: 0,
+            }}
+          >
             {needsMediaUrl && !mediaUrl && !tooLarge && (
               <div style={{ color: "rgba(255,255,255,0.3)", fontSize: "13px" }}>Loading...</div>
             )}
@@ -328,9 +417,37 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
                 </button>
               </div>
             )}
-            {isText && (
-              <div style={{ width: "100%", height: "100%", overflow: "auto", position: "relative" }}>
-                {textContent !== null ? (
+            {/* Unsaved changes warning */}
+            {escWarning && (
+              <div style={{
+                position: "absolute",
+                top: "8px",
+                left: "50%",
+                transform: "translateX(-50%)",
+                zIndex: 10,
+                background: "rgba(248, 113, 113, 0.15)",
+                border: "1px solid rgba(248, 113, 113, 0.3)",
+                borderRadius: "6px",
+                padding: "8px 16px",
+                fontSize: "12px",
+                color: "#f87171",
+                backdropFilter: "blur(8px)",
+                animation: "previewModalIn 0.1s ease-out",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+              }}>
+                Unsaved changes will be lost. Press <kbd style={{
+                  background: "rgba(255,255,255,0.1)",
+                  border: "1px solid rgba(255,255,255,0.15)",
+                  borderRadius: "3px",
+                  padding: "1px 5px",
+                  fontSize: "11px",
+                  color: "#fff",
+                }}>Esc</kbd> again to discard.
+              </div>
+            )}
+            {isText && textContent !== null && (
                   editing ? (
                     <textarea
                       ref={textareaRef}
@@ -340,15 +457,6 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
                         setDirty(true);
                       }}
                       onKeyDown={(e) => {
-                        // Escape: discard changes and close
-                        if (e.key === "Escape") {
-                          e.preventDefault();
-                          setEditing(false);
-                          setEditedContent(textContent ?? "");
-                          setDirty(false);
-                          animateClose();
-                          return;
-                        }
                         // Ctrl+S to save
                         if (e.ctrlKey && e.key === "s") {
                           e.preventDefault();
@@ -371,8 +479,8 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
                         e.stopPropagation();
                       }}
                       style={{
-                        width: "100%",
-                        height: "100%",
+                        position: "absolute",
+                        inset: 0,
                         fontFamily: "Cascadia Code, Cascadia Mono, Consolas, monospace",
                         fontSize: "12px",
                         color: "rgba(255,255,255,0.85)",
@@ -389,16 +497,19 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
                       }}
                       spellCheck={false}
                     />
-                  ) : ext === "md" && !rawView ? (
-                    <MarkdownPreview content={textContent} />
                   ) : (
-                    <CodePreview content={textContent} ext={ext} />
+                    <div style={{ width: "100%" }}>
+                      {ext === "md" && !rawView ? (
+                        <MarkdownPreview content={textContent} />
+                      ) : (
+                        <CodePreview content={textContent} ext={ext} />
+                      )}
+                    </div>
                   )
-                ) : (
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "200px", color: "rgba(255,255,255,0.3)", fontSize: "13px" }}>
-                    Loading...
-                  </div>
-                )}
+            )}
+            {isText && textContent === null && (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "200px", color: "rgba(255,255,255,0.3)", fontSize: "13px" }}>
+                Loading...
               </div>
             )}
           </div>
@@ -415,7 +526,7 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
             flexShrink: 0,
           }}>
             <div>
-              <span style={{ color: "rgba(255,255,255,0.4)" }}>↑↓</span> cycle · <span style={{ color: "rgba(255,255,255,0.4)" }}>Space</span> close · {isText && <><span style={{ color: "rgba(255,255,255,0.4)" }}>E</span> edit · </>}<span style={{ color: "rgba(255,255,255,0.4)" }}>Ctrl+Space</span> open · <span style={{ color: "rgba(255,255,255,0.4)" }}>Ctrl+Shift+Space</span> open with
+              <span style={{ color: "rgba(255,255,255,0.4)" }}>↑↓</span> scroll · <span style={{ color: "rgba(255,255,255,0.4)" }}>Shift+↑↓</span> cycle files · <span style={{ color: "rgba(255,255,255,0.4)" }}>Space</span> close · {isText && <><span style={{ color: "rgba(255,255,255,0.4)" }}>E</span> edit · </>}<span style={{ color: "rgba(255,255,255,0.4)" }}>Ctrl+Space</span> open · <span style={{ color: "rgba(255,255,255,0.4)" }}>Ctrl+Shift+Space</span> open with
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
               {saveStatus && (
@@ -449,7 +560,7 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
               )}
               {editing && (
                 <span style={{ color: "rgba(255,255,255,0.3)", fontSize: "11px" }}>
-                  Ctrl+S save · Ctrl+Space save &amp; close · Esc discard &amp; close
+                  Ctrl+S save · Ctrl+Space save &amp; close · Esc exit edit
                 </span>
               )}
             </div>

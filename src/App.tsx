@@ -101,6 +101,10 @@ function App() {
 
   const handleOpen = useCallback(
     (item: FileItem) => {
+      // Save this item as the selection for the current folder (so going back highlights it)
+      if (nav.currentPath) {
+        selectionMemory.current.set(nav.currentPath, item.path);
+      }
       if (searchResults && item.is_directory) {
         setSearchResults(null);
         setSearchQuery("");
@@ -159,20 +163,66 @@ function App() {
     [tabs, activeTabId, nav],
   );
 
+  // Remember selection per folder so going back restores position
+  const selectionMemory = useRef<Map<string, string>>(new Map());
+  const prevPathRef = useRef<string>("");
+  const lastSelectedIndexRef = useRef(0);
+
   useEffect(() => {
-    setSelectedPath(null);
+    // Save current selection for the folder we're leaving
+    if (prevPathRef.current && selectedPath) {
+      selectionMemory.current.set(prevPathRef.current, selectedPath);
+    }
+    // Remember the visual index position we were at
+    const leavingIdx = selectedIndexRef.current;
+    if (leavingIdx >= 0) {
+      lastSelectedIndexRef.current = leavingIdx;
+    }
+
+    prevPathRef.current = nav.currentPath;
     typeAheadRef.current = "";
     setTypeAheadDisplay(null);
+
+    // Determine what to select in the new folder
+    requestAnimationFrame(() => {
+      const items = displayItemsRef.current;
+      if (items.length === 0) {
+        setSelectedPath(null);
+        selectedIndexRef.current = -1;
+        return;
+      }
+
+      // Check if we have a remembered selection for this folder (going back)
+      const remembered = selectionMemory.current.get(nav.currentPath);
+      if (remembered) {
+        const idx = items.findIndex((i) => i.path === remembered);
+        if (idx >= 0) {
+          setSelectedPath(items[idx].path);
+          selectedIndexRef.current = idx;
+          scrollToIndex(idx);
+          return;
+        }
+      }
+
+      // Otherwise, keep relative position (going forward into a folder)
+      const idx = Math.min(lastSelectedIndexRef.current, items.length - 1);
+      setSelectedPath(items[idx].path);
+      selectedIndexRef.current = idx;
+      scrollToIndex(idx);
+    });
   }, [nav.currentPath]);
 
   // Keyboard mode: just hide cursor, no overlay
   const typeAheadRef = useRef("");
   const typeAheadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [typeAheadDisplay, setTypeAheadDisplay] = useState<string | null>(null);
+  const [typeAheadExitCount, setTypeAheadExitCount] = useState(0); // 0=normal, 1-3=countdown to exit
 
-  // Throttle for arrow key repeat
+  // Arrow key navigation state
   const arrowThrottleRef = useRef(0);
-  const ARROW_THROTTLE_MS = 50; // ~20 items/sec max
+  const ARROW_THROTTLE_MS = 60;
+  const selectedIndexRef = useRef(-1);
+  const pendingSelectionRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Refs for values used in keyboard handler to avoid effect thrashing
   const displayItemsRef = useRef<typeof displayItems>([]);
@@ -181,6 +231,7 @@ function App() {
   const previewPathRef = useRef(previewPath);
   const renamingPathRef = useRef(renamingPath);
   const shortcutsVisibleRef = useRef(shortcutsVisible);
+  const typeAheadExitCountRef = useRef(0);
 
   useEffect(() => {
     let lastKeyTime = 0;
@@ -232,12 +283,39 @@ function App() {
   }, [rawItems]);
 
   // Sync refs for keyboard handler
+  selectedIndexRef.current = selectedPath ? displayItems.findIndex((i) => i.path === selectedPath) : -1;
   displayItemsRef.current = displayItems;
   selectedPathRef.current = selectedPath;
   clipboardRef.current = clipboard;
   previewPathRef.current = previewPath;
   renamingPathRef.current = renamingPath;
   shortcutsVisibleRef.current = shortcutsVisible;
+  typeAheadExitCountRef.current = typeAheadExitCount;
+
+  // Handle preview file cycling via custom event from PreviewPanel
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { direction } = (e as CustomEvent).detail;
+      const items = displayItemsRef.current;
+      const currentPath = previewPathRef.current;
+      if (!currentPath || items.length === 0) return;
+      const currentIdx = items.findIndex((i) => i.path === currentPath);
+      if (currentIdx === -1) return;
+      const nextIdx = direction === "down"
+        ? Math.min(currentIdx + 1, items.length - 1)
+        : Math.max(currentIdx - 1, 0);
+      const nextItem = items[nextIdx];
+      if (nextItem) {
+        setSelectedPath(nextItem.path);
+        selectedIndexRef.current = nextIdx;
+        if (!nextItem.is_directory) {
+          setPreviewPath(nextItem.path);
+        }
+      }
+    };
+    window.addEventListener("preview-cycle", handler);
+    return () => window.removeEventListener("preview-cycle", handler);
+  }, []);
 
   // Load animations setting
   useEffect(() => {
@@ -260,6 +338,150 @@ function App() {
         e.target instanceof HTMLTextAreaElement;
 
 
+      // === Type-ahead mode: when buffer is active, capture all input ===
+      if (typeAheadRef.current.length > 0 && !inInput && !previewPath) {
+        // Escape: clear type-ahead and return to normal
+        if (e.key === "Escape") {
+          e.preventDefault();
+          typeAheadRef.current = "";
+          setTypeAheadDisplay(null);
+          if (typeAheadTimerRef.current) clearTimeout(typeAheadTimerRef.current);
+          return;
+        }
+
+        // Enter: open the currently selected match
+        if (e.key === "Enter") {
+          e.preventDefault();
+          typeAheadRef.current = "";
+          setTypeAheadDisplay(null);
+          if (typeAheadTimerRef.current) clearTimeout(typeAheadTimerRef.current);
+          const idx = selectedIndexRef.current;
+          const item = idx >= 0 ? displayItems[idx] : null;
+          if (item) {
+            if (nav.currentPath) selectionMemory.current.set(nav.currentPath, item.path);
+            setSelectedPath(item.path);
+            nav.openItem(item);
+          }
+          return;
+        }
+
+        // Arrow up/down: cycle through matches
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          const query = typeAheadRef.current;
+          const currentIdx = selectedIndexRef.current;
+          const matches = displayItems
+            .map((item, i) => ({ item, i }))
+            .filter(({ item }) => item.name.toLowerCase().includes(query));
+
+          if (matches.length > 0) {
+            let next;
+            if (e.key === "ArrowDown") {
+              next = matches.find(({ i }) => i > currentIdx) ?? matches[0];
+            } else {
+              next = [...matches].reverse().find(({ i }) => i < currentIdx) ?? matches[matches.length - 1];
+            }
+            setSelectedPath(next.item.path);
+            selectedIndexRef.current = next.i;
+            scrollToIndex(next.i);
+          }
+
+          // Reset timer
+          if (typeAheadTimerRef.current) clearTimeout(typeAheadTimerRef.current);
+          typeAheadTimerRef.current = setTimeout(() => {
+            typeAheadRef.current = "";
+            setTypeAheadDisplay(null);
+          }, 2000);
+          return;
+        }
+
+        // Backspace: delete last char, or countdown to exit if empty
+        if (e.key === "Backspace") {
+          e.preventDefault();
+          if (typeAheadTimerRef.current) clearTimeout(typeAheadTimerRef.current);
+
+          // Already empty — countdown to exit
+          if (typeAheadRef.current === "\x00" || typeAheadRef.current.length === 0) {
+            typeAheadRef.current = "\x00";
+            const nextCount = typeAheadExitCountRef.current + 1;
+            if (nextCount >= 3) {
+              // Exit search mode
+              typeAheadRef.current = "";
+              setTypeAheadDisplay(null);
+              setTypeAheadExitCount(0);
+              return;
+            }
+            setTypeAheadExitCount(nextCount);
+            setTypeAheadDisplay("");
+            typeAheadTimerRef.current = setTimeout(() => {
+              typeAheadRef.current = "";
+              setTypeAheadDisplay(null);
+              setTypeAheadExitCount(0);
+            }, 2000);
+            return;
+          }
+
+          // Normal backspace — delete last char
+          typeAheadRef.current = typeAheadRef.current.slice(0, -1);
+          setTypeAheadExitCount(0);
+          if (typeAheadRef.current.length === 0) {
+            setTypeAheadDisplay("");
+            typeAheadRef.current = "\x00";
+            typeAheadTimerRef.current = setTimeout(() => {
+              typeAheadRef.current = "";
+              setTypeAheadDisplay(null);
+              setTypeAheadExitCount(0);
+            }, 2000);
+            return;
+          }
+          setTypeAheadDisplay(typeAheadRef.current);
+          // Re-match
+          const match = displayItems.find((i) =>
+            i.name.toLowerCase().includes(typeAheadRef.current)
+          );
+          if (match) {
+            const matchIdx = displayItems.indexOf(match);
+            setSelectedPath(match.path);
+            selectedIndexRef.current = matchIdx;
+            scrollToIndex(matchIdx);
+          }
+          typeAheadTimerRef.current = setTimeout(() => {
+            typeAheadRef.current = "";
+            setTypeAheadDisplay(null);
+          }, 2000);
+          return;
+        }
+
+        // Any printable character: append to buffer (including space)
+        if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          e.preventDefault();
+          if (typeAheadTimerRef.current) clearTimeout(typeAheadTimerRef.current);
+          // If buffer is the empty marker, replace it
+          if (typeAheadRef.current === "\x00") typeAheadRef.current = "";
+          typeAheadRef.current += e.key.toLowerCase();
+          setTypeAheadExitCount(0);
+          setTypeAheadDisplay(typeAheadRef.current);
+          // Use .includes() instead of .startsWith() for better matching
+          const match = displayItems.find((i) =>
+            i.name.toLowerCase().includes(typeAheadRef.current)
+          );
+          if (match) {
+            const matchIdx = displayItems.indexOf(match);
+            setSelectedPath(match.path);
+            selectedIndexRef.current = matchIdx;
+            scrollToIndex(matchIdx);
+          }
+          typeAheadTimerRef.current = setTimeout(() => {
+            typeAheadRef.current = "";
+            setTypeAheadDisplay(null);
+          }, 2000);
+          return;
+        }
+
+        // All other keys: ignore while in type-ahead
+        return;
+      }
+
       if (e.key === "Escape") {
         if (previewPath) return; // Let PreviewPanel handle its own close animation
         setRenamingPath(null);
@@ -267,30 +489,8 @@ function App() {
         return;
       }
 
-      // When preview is open, handle arrow keys to cycle files
-      if (previewPath) {
-        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-          e.preventDefault();
-          const currentIdx = displayItems.findIndex((i) => i.path === previewPath);
-          if (currentIdx === -1) return;
-          const nextIdx = e.key === "ArrowDown"
-            ? Math.min(currentIdx + 1, displayItems.length - 1)
-            : Math.max(currentIdx - 1, 0);
-          const nextItem = displayItems[nextIdx];
-          if (nextItem) {
-            setSelectedPath(nextItem.path);
-            if (!nextItem.is_directory) {
-              setPreviewPath(nextItem.path);
-            }
-          }
-        }
-        // E to edit in preview
-        if (e.key === "e" && !e.ctrlKey) {
-          // Let PreviewPanel handle this — we'll add it there
-        }
-        // All other keys handled by PreviewPanel
-        return;
-      }
+      // When preview is open — let PreviewPanel handle everything via capture phase
+      if (previewPath) return;
 
       // Shortcuts panel (?)
       if (e.key === "?" && !inInput) {
@@ -311,7 +511,7 @@ function App() {
 
       if (inInput) return;
 
-      // === Arrow key navigation (throttled for held keys) ===
+      // === Arrow key navigation (throttled, batched state updates) ===
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
         const now = Date.now();
@@ -319,9 +519,7 @@ function App() {
         arrowThrottleRef.current = now;
 
         if (displayItems.length === 0) return;
-        const currentIdx = selectedPath
-          ? displayItems.findIndex((i) => i.path === selectedPath)
-          : -1;
+        const currentIdx = selectedIndexRef.current;
         let nextIdx: number;
         if (currentIdx === -1) {
           nextIdx = 0;
@@ -330,15 +528,57 @@ function App() {
         } else {
           nextIdx = Math.max(currentIdx - 1, 0);
         }
-        setSelectedPath(displayItems[nextIdx].path);
+
+        // Update index ref immediately (no React render)
+        selectedIndexRef.current = nextIdx;
         scrollToIndex(nextIdx);
+
+        // Visually highlight using direct DOM manipulation for speed
+        // Update DOM directly for instant visual feedback
+        const prev = document.querySelector("[data-selected='true']");
+        if (prev) {
+          prev.removeAttribute("data-selected");
+        }
+        const rows = document.querySelectorAll("[data-file-path]");
+        const nextRow = rows[nextIdx] as HTMLElement | undefined;
+        if (nextRow) {
+          nextRow.setAttribute("data-selected", "true");
+        }
+
+        // Debounce the React state update — only fires after keys stop
+        if (pendingSelectionRef.current) clearTimeout(pendingSelectionRef.current);
+        pendingSelectionRef.current = setTimeout(() => {
+          setSelectedPath(displayItems[selectedIndexRef.current]?.path ?? null);
+          pendingSelectionRef.current = null;
+        }, 80);
       }
 
-      // Right arrow or Enter: open selected item
-      if ((e.key === "ArrowRight" || e.key === "Enter") && selectedPath && !renamingPath) {
+      // Right arrow or Enter: open selected item (use ref for latest selection)
+      if ((e.key === "ArrowRight" || e.key === "Enter") && !renamingPath) {
+        const idx = selectedIndexRef.current;
+        const item = idx >= 0 ? displayItems[idx] : null;
+        if (item) {
+          e.preventDefault();
+          // Flush any pending selection
+          if (pendingSelectionRef.current) {
+            clearTimeout(pendingSelectionRef.current);
+            pendingSelectionRef.current = null;
+          }
+          // Remember this item so going back highlights it
+          const currentPath = nav.currentPath;
+          if (currentPath) {
+            selectionMemory.current.set(currentPath, item.path);
+          }
+          setSelectedPath(item.path);
+          nav.openItem(item);
+        }
+      }
+
+      // Ctrl+Shift+Left: jump to drives page
+      if (e.ctrlKey && e.shiftKey && e.key === "ArrowLeft") {
         e.preventDefault();
-        const item = displayItems.find((i) => i.path === selectedPath);
-        if (item) nav.openItem(item);
+        nav.navigateToPath("drives://");
+        return;
       }
 
       // Left arrow: go up (but not during type-ahead)
@@ -383,83 +623,33 @@ function App() {
         scrollToIndex(nextIdx);
       }
 
-      // Type-ahead: accumulate keystrokes to search filenames
-      // First key jumps to that letter, continued typing refines the match
+      // Type-ahead: first keystroke starts type-ahead mode (handled at top of handler)
       if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey && e.key !== " " && e.key !== "`" && e.key !== "?") {
-        // Clear previous timer
-        if (typeAheadTimerRef.current) clearTimeout(typeAheadTimerRef.current);
-
-        const prevBuffer = typeAheadRef.current;
-        const newChar = e.key.toLowerCase();
-
-        // If same single character repeated, cycle through matches instead of appending
-        if (prevBuffer.length === 1 && prevBuffer === newChar) {
-          const currentIdx = selectedPath
-            ? displayItems.findIndex((i) => i.path === selectedPath)
-            : -1;
-          const search = [...displayItems.slice(currentIdx + 1), ...displayItems.slice(0, currentIdx + 1)];
-          const match = search.find((i) => i.name.toLowerCase().startsWith(newChar));
-          if (match) {
-            const matchIdx = displayItems.indexOf(match);
-            setSelectedPath(match.path);
-            scrollToIndex(matchIdx);
-          }
-        } else {
-          // Append to buffer
-          typeAheadRef.current = prevBuffer + newChar;
-          const query = typeAheadRef.current;
-
-          // Find best match
-          const match = displayItems.find((i) =>
-            i.name.toLowerCase().startsWith(query)
-          );
-          if (match) {
-            const matchIdx = displayItems.indexOf(match);
-            setSelectedPath(match.path);
-            scrollToIndex(matchIdx);
-          }
-        }
-
-        // Show the search buffer
+        e.preventDefault();
+        typeAheadRef.current = e.key.toLowerCase();
         setTypeAheadDisplay(typeAheadRef.current);
-
-        // Clear buffer after 1.5s of inactivity
+        // Find first match using .includes()
+        const match = displayItems.find((i) =>
+          i.name.toLowerCase().includes(typeAheadRef.current)
+        );
+        if (match) {
+          const matchIdx = displayItems.indexOf(match);
+          setSelectedPath(match.path);
+          selectedIndexRef.current = matchIdx;
+          scrollToIndex(matchIdx);
+        }
+        if (typeAheadTimerRef.current) clearTimeout(typeAheadTimerRef.current);
         typeAheadTimerRef.current = setTimeout(() => {
           typeAheadRef.current = "";
           setTypeAheadDisplay(null);
-        }, 1500);
-
+        }, 2000);
         return;
       }
 
-      // Alt+Navigation
+      // Backspace: go up
       if (e.key === "Backspace") {
         e.preventDefault();
-        // If type-ahead is active, delete last character
-        if (typeAheadRef.current.length > 0) {
-          if (typeAheadTimerRef.current) clearTimeout(typeAheadTimerRef.current);
-          typeAheadRef.current = typeAheadRef.current.slice(0, -1);
-          if (typeAheadRef.current.length === 0) {
-            setTypeAheadDisplay(null);
-          } else {
-            setTypeAheadDisplay(typeAheadRef.current);
-            // Re-match with shortened query
-            const match = displayItems.find((i) =>
-              i.name.toLowerCase().startsWith(typeAheadRef.current)
-            );
-            if (match) {
-              const matchIdx = displayItems.indexOf(match);
-              setSelectedPath(match.path);
-              scrollToIndex(matchIdx);
-            }
-          }
-          typeAheadTimerRef.current = setTimeout(() => {
-            typeAheadRef.current = "";
-            setTypeAheadDisplay(null);
-          }, 1500);
-        } else {
-          nav.goUp();
-        }
+        nav.goUp();
       }
       if (e.altKey && e.key === "ArrowLeft") { e.preventDefault(); nav.goBack(); }
       if (e.altKey && e.key === "ArrowRight") { e.preventDefault(); nav.goForward(); }
@@ -469,25 +659,32 @@ function App() {
       if (e.ctrlKey && e.key === "w") { e.preventDefault(); handleCloseTab(activeTabId); }
 
       // Ctrl+Shift+Space: "Open with..." dialog
-      if (e.ctrlKey && e.shiftKey && e.key === " " && selectedPath) {
-        e.preventDefault();
-        import("./api").then(({ openFileWith }) => openFileWith(selectedPath));
+      if (e.ctrlKey && e.shiftKey && e.key === " ") {
+        const currentItem = displayItems[selectedIndexRef.current];
+        if (currentItem) {
+          e.preventDefault();
+          import("./api").then(({ openFileWith }) => openFileWith(currentItem.path));
+        }
         return;
       }
 
       // Ctrl+Space: open with default app
-      if (e.ctrlKey && e.key === " " && selectedPath) {
-        e.preventDefault();
-        import("./api").then(({ openFile }) => openFile(selectedPath));
+      if (e.ctrlKey && e.key === " ") {
+        const currentItem = displayItems[selectedIndexRef.current];
+        if (currentItem) {
+          e.preventDefault();
+          import("./api").then(({ openFile }) => openFile(currentItem.path));
+        }
         return;
       }
 
       // Space: preview
-      if (e.key === " " && selectedPath) {
-        e.preventDefault();
-        const item = displayItems.find((i) => i.path === selectedPath);
-        if (item && !item.is_directory) {
-          setPreviewPath(selectedPath);
+      if (e.key === " ") {
+        const currentItem = displayItems[selectedIndexRef.current];
+        if (currentItem && !currentItem.is_directory) {
+          e.preventDefault();
+          setSelectedPath(currentItem.path);
+          setPreviewPath(currentItem.path);
         }
       }
 
@@ -774,7 +971,7 @@ function App() {
       )}
 
       {/* Type-ahead search indicator */}
-      {typeAheadDisplay && (
+      {typeAheadDisplay !== null && (
         <div
           style={{
             position: "fixed",
@@ -797,14 +994,32 @@ function App() {
             animation: "previewModalIn 0.12s ease-out",
           }}
         >
-          <span style={{ color: "rgba(255,255,255,0.4)", fontSize: "12px" }}>Jump to:</span>
-          <span style={{ fontWeight: 500 }}>{typeAheadDisplay}</span>
-          <span style={{
-            width: "2px",
-            height: "16px",
-            background: "#60cdff",
-            animation: "blink 1s step-end infinite",
-          }} />
+          <span style={{ color: typeAheadExitCount > 0 ? "#f87171" : "#60cdff", fontSize: "12px" }}>
+            {typeAheadExitCount > 0 ? "Exit" : "Search"}:
+          </span>
+          <span style={{ fontWeight: 500, minWidth: "20px" }}>{typeAheadDisplay}</span>
+          {typeAheadExitCount > 0 ? (
+            <span style={{ display: "flex", gap: "3px", alignItems: "center" }}>
+              {[1, 2, 3].map((n) => (
+                <span
+                  key={n}
+                  style={{
+                    width: "6px",
+                    height: "6px",
+                    borderRadius: "3px",
+                    background: n <= typeAheadExitCount ? "#f87171" : "rgba(255,255,255,0.15)",
+                  }}
+                />
+              ))}
+            </span>
+          ) : (
+            <span style={{
+              width: "2px",
+              height: "16px",
+              background: "#60cdff",
+              animation: "blink 1s step-end infinite",
+            }} />
+          )}
         </div>
       )}
 

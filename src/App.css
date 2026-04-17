@@ -43,44 +43,28 @@ html, body, #root {
 
 /* === Animations === */
 
-/* File row entrance — staggered fade + slide */
-.anim-row-enter {
-  animation: rowEnter 0.2s ease-out both;
-}
-
-@keyframes rowEnter {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-/* View transition — content fade */
-.anim-view-enter {
-  animation: viewEnter 0.15s ease-out both;
-}
-
-@keyframes viewEnter {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
+/* Row entrance — disabled for performance, keeping class for compatibility */
+.anim-row-enter {}
 
 /* List item hover — pure CSS, no React state */
 .list-item-hover:hover {
   background: rgba(255, 255, 255, 0.05);
 }
+.list-item-hover[data-selected="true"],
 .list-item-hover[data-selected="true"]:hover {
   background: rgba(255, 255, 255, 0.1);
+}
+
+/* Selection accent bar — pure CSS via data attribute */
+.list-item-hover[data-selected="true"]::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 25%;
+  bottom: 25%;
+  width: 3px;
+  border-radius: 2px;
+  background: #60cdff;
 }
 
 /* Smooth tab switch */
@@ -143,34 +127,22 @@ html, body, #root {
   100% { transform: translateX(-100%); }
 }
 
-/* Folder navigation — directional slide */
+/* Folder navigation — fast directional sweep, no fade */
 .nav-forward {
-  animation: navForward 0.18s ease-out both;
+  animation: navForward 0.1s ease-out both;
 }
 .nav-back {
-  animation: navBack 0.18s ease-out both;
+  animation: navBack 0.1s ease-out both;
 }
 
 @keyframes navForward {
-  from {
-    opacity: 0;
-    transform: translateX(30px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+  from { transform: translateX(20px); }
+  to { transform: translateX(0); }
 }
 
 @keyframes navBack {
-  from {
-    opacity: 0;
-    transform: translateX(-30px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+  from { transform: translateX(-20px); }
+  to { transform: translateX(0); }
 }
 
 /* Keyboard mode — overlay that hides cursor and blocks mouse interaction */
