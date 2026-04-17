@@ -209,7 +209,7 @@ export function FileList({
   };
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0, overflow: "hidden", background: "rgba(32,32,32,0.55)" }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0, overflow: "hidden", background: "rgba(32,32,32,0.65)" }}>
       {/* Hidden measurement span */}
       <span
         ref={measureRef}

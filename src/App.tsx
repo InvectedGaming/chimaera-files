@@ -167,9 +167,7 @@ function App() {
     setTypeAheadDisplay(null);
   }, [nav.currentPath]);
 
-  // Keyboard mode: show an invisible overlay that blocks mouse hover
-  const [keyboardMode, setKeyboardMode] = useState(false);
-  const keyboardModeRef = useRef(false);
+  // Keyboard mode: just hide cursor, no overlay
   const typeAheadRef = useRef("");
   const typeAheadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [typeAheadDisplay, setTypeAheadDisplay] = useState<string | null>(null);
@@ -180,22 +178,13 @@ function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Shift" || e.key === "Control" || e.key === "Alt" || e.key === "Meta") return;
       lastKeyTime = Date.now();
-      if (!keyboardModeRef.current) {
-        keyboardModeRef.current = true;
-        setKeyboardMode(true);
-      }
+      document.documentElement.style.cursor = "none";
     };
 
     const onMouseMove = (e: MouseEvent) => {
-      if (!keyboardModeRef.current) return;
-      // Ignore phantom mouse events that fire during rapid key repeat
-      // Only respond to real mouse movement (> 3px)
-      if (e.movementX === 0 && e.movementY === 0) return;
-      if (Math.abs(e.movementX) < 3 && Math.abs(e.movementY) < 3) return;
-      // Ignore if a key was pressed very recently
-      if (Date.now() - lastKeyTime < 100) return;
-      keyboardModeRef.current = false;
-      setKeyboardMode(false);
+      if (Math.abs(e.movementX) < 2 && Math.abs(e.movementY) < 2) return;
+      if (Date.now() - lastKeyTime < 50) return;
+      document.documentElement.style.cursor = "";
     };
 
     window.addEventListener("keydown", onKeyDown);
@@ -203,6 +192,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("mousemove", onMouseMove);
+      document.documentElement.style.cursor = "";
     };
   }, []);
 
@@ -306,8 +296,8 @@ function App() {
         if (item) nav.openItem(item);
       }
 
-      // Left arrow: go up
-      if (e.key === "ArrowLeft" && !e.altKey) {
+      // Left arrow: go up (but not during type-ahead)
+      if (e.key === "ArrowLeft" && !e.altKey && typeAheadRef.current.length === 0) {
         e.preventDefault();
         nav.goUp();
       }
@@ -507,7 +497,7 @@ function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [nav, handleNewTab, handleCloseTab, activeTabId, selectedPath, clipboard, displayItems]);
+  }, [nav, handleNewTab, handleCloseTab, activeTabId, selectedPath, clipboard, displayItems, previewPath, renamingPath, shortcutsVisible]);
 
   return (
     <AnimationsContext.Provider value={animationsEnabled}>
@@ -772,18 +762,6 @@ function App() {
 
       <style>{`@keyframes blink { 50% { opacity: 0; } }`}</style>
 
-      {/* Keyboard mode overlay — blocks mouse hover without CSS hacks */}
-      {keyboardMode && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 9999,
-            cursor: "none",
-          }}
-          onMouseMove={() => setKeyboardMode(false)}
-        />
-      )}
     </div>
     </AnimationsContext.Provider>
   );
