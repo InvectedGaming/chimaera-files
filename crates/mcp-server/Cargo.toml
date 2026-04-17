@@ -1,0 +1,15 @@
+[package]
+name = "chimaera-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "chimaera-mcp"
+path = "src/main.rs"
+
+[dependencies]
+chimaera-common = { path = "../common" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

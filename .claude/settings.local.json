@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pandoc \"F:/Locations/Downloads/Chimaera_Files_Build_Plan.docx\" -o /dev/stdout -t markdown)",
+      "Bash(cargo check:*)",
+      "Bash(bun run:*)"
+    ]
+  }
+}

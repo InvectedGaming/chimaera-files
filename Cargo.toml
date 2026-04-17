@@ -1,0 +1,16 @@
+[workspace]
+members = ["src-tauri", "crates/common", "crates/indexer", "crates/mcp-server"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rusqlite = { version = "0.39", features = ["bundled"] }
+tokio = { version = "1", features = ["full"] }
+walkdir = "2"
+rayon = "1"
