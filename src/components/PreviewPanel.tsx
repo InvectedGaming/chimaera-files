@@ -16,15 +16,16 @@ const videoExts = new Set(["mp4", "mkv", "avi", "mov", "webm", "m4v", "wmv"]);
 const audioExts = new Set(["mp3", "wav", "flac", "ogg", "m4a", "aac", "wma"]);
 const pdfExts = new Set(["pdf"]);
 
+const binaryExts = new Set([
+  "exe", "dll", "sys", "bin", "iso", "img", "dmg",
+  "zip", "tar", "gz", "7z", "rar", "bz2", "xz",
+  "db", "sqlite", "mdb",
+  "psd", "ai", "sketch", "fig",
+  "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+  "ttf", "otf", "woff", "woff2",
+]);
+
 function isKnownBinary(ext: string): boolean {
-  const binaryExts = new Set([
-    "exe", "dll", "sys", "bin", "iso", "img", "dmg",
-    "zip", "tar", "gz", "7z", "rar", "bz2", "xz",
-    "db", "sqlite", "mdb",
-    "psd", "ai", "sketch", "fig",
-    "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-    "ttf", "otf", "woff", "woff2",
-  ]);
   return binaryExts.has(ext) || imageExts.has(ext) || videoExts.has(ext) || audioExts.has(ext) || pdfExts.has(ext);
 }
 

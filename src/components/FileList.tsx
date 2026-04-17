@@ -12,7 +12,7 @@ import {
   Palette,
   Globe,
 } from "lucide-react";
-import { useCallback, useRef, useEffect, useState } from "react";
+import { useCallback, useRef, useEffect, useState, useMemo } from "react";
 import { type FileItem, getFolderSizes } from "../api";
 import { formatSize, formatDate, getFileIcon } from "../utils/format";
 import { ListItem } from "./ListItem";
@@ -46,6 +46,7 @@ interface FileListProps {
   renamingPath?: string | null;
   onRename?: (path: string, newName: string) => void;
   onCancelRename?: () => void;
+  className?: string;
 }
 
 type SortKey = "name" | "size" | "modified" | "type";
@@ -61,13 +62,13 @@ export function FileList({
   renamingPath,
   onRename,
   onCancelRename,
+  className: listClassName,
 }: FileListProps) {
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [folderSizes, setFolderSizes] = useState<Record<string, number>>({});
   const [colWidths, setColWidths] = useState({ name: 250, size: 100, modified: 150, type: 100 });
   const listRef = useRef<HTMLDivElement>(null);
-  const measureRef = useRef<HTMLSpanElement>(null);
   const dragRef = useRef<{ col: string; startX: number; startWidth: number } | null>(null);
 
   const handleSort = useCallback(
@@ -101,15 +102,17 @@ export function FileList({
   }, [items]);
 
   // Auto-size name column to longest name, capped at 20vw
+  // Uses canvas.measureText (no layout reflow, ~10x faster than DOM)
   useEffect(() => {
-    if (!measureRef.current || items.length === 0) return;
-    const el = measureRef.current;
+    if (items.length === 0) return;
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.font = "13px Segoe UI Variable Text, Segoe UI, system-ui, sans-serif";
     let maxW = 0;
     for (const item of items) {
-      el.textContent = item.name;
-      maxW = Math.max(maxW, el.offsetWidth);
+      maxW = Math.max(maxW, ctx.measureText(item.name).width);
     }
-    // icon (18) + gap (12) + padding (28)
     const fullWidth = maxW + 58;
     const maxAllowed = window.innerWidth * 0.2;
     const minAllowed = 120;
@@ -124,7 +127,7 @@ export function FileList({
     [folderSizes],
   );
 
-  const sorted = [...items].sort((a, b) => {
+  const sorted = useMemo(() => [...items].sort((a, b) => {
     if (a.is_directory !== b.is_directory) return a.is_directory ? -1 : 1;
     const dir = sortDir === "asc" ? 1 : -1;
     switch (sortKey) {
@@ -139,7 +142,7 @@ export function FileList({
       default:
         return 0;
     }
-  });
+  }), [items, sortKey, sortDir, getItemSize]);
 
   useEffect(() => {
     listRef.current?.scrollTo(0, 0);
@@ -209,19 +212,7 @@ export function FileList({
   };
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0, overflow: "hidden", background: "rgba(32,32,32,0.65)" }}>
-      {/* Hidden measurement span */}
-      <span
-        ref={measureRef}
-        style={{
-          position: "absolute",
-          visibility: "hidden",
-          whiteSpace: "nowrap",
-          fontSize: "13px",
-          fontFamily: "Segoe UI Variable Text, Segoe UI, system-ui, sans-serif",
-        }}
-      />
-
+    <div className={listClassName} style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0, overflow: "hidden", background: "rgba(32,32,32,0.65)" }}>
       {/* Column headers */}
       <div
         style={{

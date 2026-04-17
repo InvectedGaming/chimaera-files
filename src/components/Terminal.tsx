@@ -92,7 +92,7 @@ export function TerminalPanel({ cwd, visible }: TerminalProps) {
       idRef.current = null;
       setReady(false);
     };
-  }, [visible, cwd]);
+  }, [visible]); // Don't respawn PTY on cwd change — just cd into it
 
   if (!visible) return null;
 

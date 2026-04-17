@@ -75,13 +75,12 @@ html, body, #root {
   }
 }
 
-/* Sidebar item hover glow */
-.anim-hover {
-  transition: background 0.1s ease-out;
+/* List item hover — pure CSS, no React state */
+.list-item-hover:hover {
+  background: rgba(255, 255, 255, 0.05);
 }
-
-/* Selection highlight */
-.anim-select {
+.list-item-hover[data-selected="true"]:hover {
+  background: rgba(255, 255, 255, 0.1);
 }
 
 /* Smooth tab switch */
@@ -142,6 +141,36 @@ html, body, #root {
   0% { transform: translateX(-100%); }
   50% { transform: translateX(200%); }
   100% { transform: translateX(-100%); }
+}
+
+/* Folder navigation — directional slide */
+.nav-forward {
+  animation: navForward 0.18s ease-out both;
+}
+.nav-back {
+  animation: navBack 0.18s ease-out both;
+}
+
+@keyframes navForward {
+  from {
+    opacity: 0;
+    transform: translateX(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes navBack {
+  from {
+    opacity: 0;
+    transform: translateX(-30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 /* Keyboard mode — overlay that hides cursor and blocks mouse interaction */

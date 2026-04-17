@@ -37,6 +37,10 @@ pub fn run() {
         .setup(move |app| {
             let window = app.get_webview_window("main").unwrap();
 
+            // Open devtools in debug mode
+            #[cfg(debug_assertions)]
+            window.open_devtools();
+
             // Apply Mica Dark backdrop
             #[cfg(target_os = "windows")]
             {

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { TitleBar } from "./components/TitleBar";
 import { PathBar } from "./components/PathBar";
 import { Sidebar } from "./components/Sidebar";
@@ -40,7 +40,6 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(240);
   const [view, setView] = useState<"browser" | "settings">("browser");
   const [animationsEnabled, setAnimationsEnabled] = useState(true);
-  const [navKey, setNavKey] = useState(0);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [clipboard, setClipboard] = useState<{ paths: string[]; cut: boolean } | null>(null);
@@ -162,7 +161,6 @@ function App() {
 
   useEffect(() => {
     setSelectedPath(null);
-    setNavKey((k) => k + 1);
     typeAheadRef.current = "";
     setTypeAheadDisplay(null);
   }, [nav.currentPath]);
@@ -171,6 +169,18 @@ function App() {
   const typeAheadRef = useRef("");
   const typeAheadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [typeAheadDisplay, setTypeAheadDisplay] = useState<string | null>(null);
+
+  // Throttle for arrow key repeat
+  const arrowThrottleRef = useRef(0);
+  const ARROW_THROTTLE_MS = 50; // ~20 items/sec max
+
+  // Refs for values used in keyboard handler to avoid effect thrashing
+  const displayItemsRef = useRef<typeof displayItems>([]);
+  const selectedPathRef = useRef(selectedPath);
+  const clipboardRef = useRef(clipboard);
+  const previewPathRef = useRef(previewPath);
+  const renamingPathRef = useRef(renamingPath);
+  const shortcutsVisibleRef = useRef(shortcutsVisible);
 
   useEffect(() => {
     let lastKeyTime = 0;
@@ -198,11 +208,20 @@ function App() {
 
   const rawItems = searchResults ?? nav.items;
   const isSearching = searchResults !== null;
-  // Sort to match FileList's default order: directories first, then alphabetical
-  const displayItems = [...rawItems].sort((a, b) => {
-    if (a.is_directory !== b.is_directory) return a.is_directory ? -1 : 1;
-    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-  });
+  const displayItems = useMemo(() => {
+    return [...rawItems].sort((a, b) => {
+      if (a.is_directory !== b.is_directory) return a.is_directory ? -1 : 1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+  }, [rawItems]);
+
+  // Sync refs for keyboard handler
+  displayItemsRef.current = displayItems;
+  selectedPathRef.current = selectedPath;
+  clipboardRef.current = clipboard;
+  previewPathRef.current = previewPath;
+  renamingPathRef.current = renamingPath;
+  shortcutsVisibleRef.current = shortcutsVisible;
 
   // Load animations setting
   useEffect(() => {
@@ -212,10 +231,18 @@ function App() {
   // Keyboard shortcuts
   useEffect(() => {
     const handler = async (e: KeyboardEvent) => {
-      // Don't capture when typing in an input (except Escape)
+      // Read current values from refs (avoids stale closures)
+      const selectedPath = selectedPathRef.current;
+      const displayItems = displayItemsRef.current;
+      const clipboard = clipboardRef.current;
+      const previewPath = previewPathRef.current;
+      const renamingPath = renamingPathRef.current;
+      const shortcutsVisible = shortcutsVisibleRef.current;
+
       const inInput =
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement;
+
 
       if (e.key === "Escape") {
         if (previewPath) return; // Let PreviewPanel handle its own close animation
@@ -268,25 +295,28 @@ function App() {
 
       if (inInput) return;
 
-      // === Arrow key navigation ===
+      // === Arrow key navigation (throttled for held keys) ===
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
+        const now = Date.now();
+        if (e.repeat && now - arrowThrottleRef.current < ARROW_THROTTLE_MS) return;
+        arrowThrottleRef.current = now;
+
         if (displayItems.length === 0) return;
         const currentIdx = selectedPath
           ? displayItems.findIndex((i) => i.path === selectedPath)
           : -1;
         let nextIdx: number;
         if (currentIdx === -1) {
-          nextIdx = 0; // Select first item
+          nextIdx = 0;
         } else if (e.key === "ArrowDown") {
           nextIdx = Math.min(currentIdx + 1, displayItems.length - 1);
         } else {
           nextIdx = Math.max(currentIdx - 1, 0);
         }
         setSelectedPath(displayItems[nextIdx].path);
-        // Scroll the selected item into view
         const el = document.querySelector(`[data-file-path="${CSS.escape(displayItems[nextIdx].path)}"]`);
-        el?.scrollIntoView({ block: "nearest" });
+        el?.scrollIntoView({ block: "nearest", behavior: e.repeat ? "instant" : "smooth" });
       }
 
       // Right arrow or Enter: open selected item
@@ -497,7 +527,7 @@ function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [nav, handleNewTab, handleCloseTab, activeTabId, selectedPath, clipboard, displayItems, previewPath, renamingPath, shortcutsVisible]);
+  }, [nav, handleNewTab, handleCloseTab, activeTabId]);
 
   return (
     <AnimationsContext.Provider value={animationsEnabled}>
@@ -600,7 +630,7 @@ function App() {
               }
             />
             <FileList
-              key={navKey}
+              className={nav.navDirection === "forward" ? "nav-forward" : nav.navDirection === "back" ? "nav-back" : ""}
               items={displayItems}
               loading={nav.loading && !isSearching}
               error={nav.error}

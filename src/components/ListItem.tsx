@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, memo } from "react";
 import clsx from "clsx";
 import { useAnimations } from "../hooks/useAnimations";
 
@@ -19,7 +19,7 @@ interface ListItemProps {
   onDragOver?: (e: React.DragEvent) => void;
 }
 
-export function ListItem({
+export const ListItem = memo(function ListItem({
   children,
   active = false,
   selected = false,
@@ -37,7 +37,6 @@ export function ListItem({
 }: ListItemProps) {
   const animated = useAnimations();
   const [dragOverState, setDragOverState] = useState(false);
-  const [hovered, setHovered] = useState(false);
 
   const bg = selected
     ? "rgba(255,255,255,0.1)"
@@ -45,14 +44,12 @@ export function ListItem({
       ? "rgba(255,255,255,0.08)"
       : dragOverState
         ? "rgba(255,255,255,0.12)"
-        : hovered
-          ? "rgba(255,255,255,0.05)"
-          : undefined;
+        : undefined;
 
   return (
     <div
       className={clsx(
-        "flex items-center cursor-default rounded-[4px]",
+        "flex items-center cursor-default rounded-[4px] list-item-hover",
         animated && animDelay !== undefined && "anim-row-enter",
         className,
       )}
@@ -62,6 +59,7 @@ export function ListItem({
         fontSize: "13px",
         minHeight: "36px",
         background: bg,
+        position: "relative",
         ...(animated && animDelay !== undefined
           ? { animationDelay: `${animDelay}ms` }
           : {}),
@@ -69,6 +67,7 @@ export function ListItem({
         ...style,
       }}
       {...dataAttrs}
+      data-selected={selected ? "true" : undefined}
       draggable={draggable}
       onDragStart={onDragStart}
       onDragOver={(e) => {
@@ -82,13 +81,23 @@ export function ListItem({
         setDragOverState(false);
         onDrop?.(e);
       }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
       onAuxClick={onAuxClick}
     >
+      {/* Selection accent bar */}
+      {selected && (
+        <div style={{
+          position: "absolute",
+          left: "2px",
+          top: "25%",
+          bottom: "25%",
+          width: "3px",
+          borderRadius: "2px",
+          background: "#60cdff",
+        }} />
+      )}
       {children}
     </div>
   );
-}
+});

@@ -10,6 +10,8 @@ import {
   type FileItem,
 } from "../api";
 
+export type NavDirection = "forward" | "back" | "none";
+
 export interface NavigationState {
   currentPath: string;
   items: FileItem[];
@@ -28,6 +30,7 @@ export function useFileNavigation() {
     history: [],
     historyIndex: -1,
   });
+  const [navDirection, setNavDirection] = useState<NavDirection>("none");
 
   const isNavigating = useRef(false);
   const currentPathRef = useRef("");
@@ -50,6 +53,14 @@ export function useFileNavigation() {
     async (path: string, addToHistory = true) => {
       if (isNavigating.current) return;
       isNavigating.current = true;
+
+      // Determine direction for animation
+      const oldPath = currentPathRef.current;
+      if (oldPath && path !== oldPath) {
+        const oldDepth = oldPath.split("/").filter(Boolean).length;
+        const newDepth = path.split("/").filter(Boolean).length;
+        setNavDirection(newDepth > oldDepth ? "forward" : newDepth < oldDepth ? "back" : "forward");
+      }
 
       setState((prev) => ({ ...prev, loading: true, error: null }));
 
@@ -181,6 +192,7 @@ export function useFileNavigation() {
     goUp,
     openItem,
     refreshCurrentDir,
+    navDirection,
     canGoBack: state.historyIndex > 0,
     canGoForward: state.historyIndex < state.history.length - 1,
     canGoUp: state.currentPath !== "drives://",
