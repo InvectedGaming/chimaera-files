@@ -212,7 +212,7 @@ export function FileList({
   };
 
   return (
-    <div className={listClassName} style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0, overflow: "hidden", background: "rgba(32,32,32,0.65)" }}>
+    <div className={listClassName} style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0, overflow: "hidden", background: "rgba(25,25,25,0.75)" }}>
       {/* Column headers */}
       <div
         style={{
@@ -245,7 +245,7 @@ export function FileList({
       </div>
 
       {/* File rows */}
-      <div ref={listRef} style={{ flex: 1, overflowY: "auto" }}>
+      <div ref={listRef} data-file-list-scroll style={{ flex: 1, overflowY: "auto" }}>
         {sorted.length === 0 ? (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "128px", color: "rgba(255,255,255,0.36)", fontSize: "13px" }}>
             This folder is empty

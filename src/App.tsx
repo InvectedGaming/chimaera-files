@@ -206,6 +206,22 @@ function App() {
     };
   }, []);
 
+  // Scroll a file row into view by index — uses math instead of DOM querySelector
+  const scrollToIndex = useCallback((idx: number) => {
+    const container = document.querySelector("[data-file-list-scroll]");
+    if (!container) return;
+    const rowHeight = 36; // matches ListItem minHeight
+    const targetTop = idx * rowHeight;
+    const containerHeight = container.clientHeight;
+    const scrollTop = container.scrollTop;
+
+    if (targetTop < scrollTop) {
+      container.scrollTop = targetTop;
+    } else if (targetTop + rowHeight > scrollTop + containerHeight) {
+      container.scrollTop = targetTop + rowHeight - containerHeight;
+    }
+  }, []);
+
   const rawItems = searchResults ?? nav.items;
   const isSearching = searchResults !== null;
   const displayItems = useMemo(() => {
@@ -315,8 +331,7 @@ function App() {
           nextIdx = Math.max(currentIdx - 1, 0);
         }
         setSelectedPath(displayItems[nextIdx].path);
-        const el = document.querySelector(`[data-file-path="${CSS.escape(displayItems[nextIdx].path)}"]`);
-        el?.scrollIntoView({ block: "nearest", behavior: e.repeat ? "instant" : "smooth" });
+        scrollToIndex(nextIdx);
       }
 
       // Right arrow or Enter: open selected item
@@ -337,7 +352,7 @@ function App() {
         e.preventDefault();
         if (displayItems.length > 0) {
           setSelectedPath(displayItems[0].path);
-          document.querySelector(`[data-file-path="${CSS.escape(displayItems[0].path)}"]`)?.scrollIntoView({ block: "nearest" });
+          scrollToIndex(0);
         }
       }
 
@@ -347,7 +362,7 @@ function App() {
         if (displayItems.length > 0) {
           const last = displayItems[displayItems.length - 1];
           setSelectedPath(last.path);
-          document.querySelector(`[data-file-path="${CSS.escape(last.path)}"]`)?.scrollIntoView({ block: "nearest" });
+          scrollToIndex(displayItems.length - 1);
         }
       }
 
@@ -365,7 +380,7 @@ function App() {
           nextIdx = Math.max((currentIdx === -1 ? 0 : currentIdx) - jump, 0);
         }
         setSelectedPath(displayItems[nextIdx].path);
-        document.querySelector(`[data-file-path="${CSS.escape(displayItems[nextIdx].path)}"]`)?.scrollIntoView({ block: "nearest" });
+        scrollToIndex(nextIdx);
       }
 
       // Type-ahead: accumulate keystrokes to search filenames
@@ -385,8 +400,9 @@ function App() {
           const search = [...displayItems.slice(currentIdx + 1), ...displayItems.slice(0, currentIdx + 1)];
           const match = search.find((i) => i.name.toLowerCase().startsWith(newChar));
           if (match) {
+            const matchIdx = displayItems.indexOf(match);
             setSelectedPath(match.path);
-            document.querySelector(`[data-file-path="${CSS.escape(match.path)}"]`)?.scrollIntoView({ block: "nearest" });
+            scrollToIndex(matchIdx);
           }
         } else {
           // Append to buffer
@@ -398,8 +414,9 @@ function App() {
             i.name.toLowerCase().startsWith(query)
           );
           if (match) {
+            const matchIdx = displayItems.indexOf(match);
             setSelectedPath(match.path);
-            document.querySelector(`[data-file-path="${CSS.escape(match.path)}"]`)?.scrollIntoView({ block: "nearest" });
+            scrollToIndex(matchIdx);
           }
         }
 
@@ -431,8 +448,9 @@ function App() {
               i.name.toLowerCase().startsWith(typeAheadRef.current)
             );
             if (match) {
+              const matchIdx = displayItems.indexOf(match);
               setSelectedPath(match.path);
-              document.querySelector(`[data-file-path="${CSS.escape(match.path)}"]`)?.scrollIntoView({ block: "nearest" });
+              scrollToIndex(matchIdx);
             }
           }
           typeAheadTimerRef.current = setTimeout(() => {
