@@ -49,7 +49,7 @@ export function Toolbar({
         height: "40px",
         padding: "0 16px",
         gap: "2px",
-        background: "rgba(32, 32, 32, 0.7)",
+        background: "rgba(24, 24, 24, 0.92)",
         borderBottom: "1px solid rgba(255,255,255,0.07)",
         flexShrink: 0,
       }}

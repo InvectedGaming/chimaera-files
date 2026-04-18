@@ -1,66 +1,33 @@
-import { useMemo } from "react";
-import hljs from "highlight.js/lib/core";
+import { useEffect, useState, useRef } from "react";
 
-// Register only common languages to keep bundle size down
-import javascript from "highlight.js/lib/languages/javascript";
-import typescript from "highlight.js/lib/languages/typescript";
-import json from "highlight.js/lib/languages/json";
-import xml from "highlight.js/lib/languages/xml";
-import css from "highlight.js/lib/languages/css";
-import python from "highlight.js/lib/languages/python";
-import rust from "highlight.js/lib/languages/rust";
-import bash from "highlight.js/lib/languages/bash";
-import yaml from "highlight.js/lib/languages/yaml";
-import markdown from "highlight.js/lib/languages/markdown";
-import sql from "highlight.js/lib/languages/sql";
-import ini from "highlight.js/lib/languages/ini";
-import diff from "highlight.js/lib/languages/diff";
-import go from "highlight.js/lib/languages/go";
-import java from "highlight.js/lib/languages/java";
-import csharp from "highlight.js/lib/languages/csharp";
-import cpp from "highlight.js/lib/languages/cpp";
-import powershell from "highlight.js/lib/languages/powershell";
+let worker: Worker | null = null;
+let nextId = 0;
+const pending = new Map<number, (html: string | null) => void>();
 
-hljs.registerLanguage("javascript", javascript);
-hljs.registerLanguage("typescript", typescript);
-hljs.registerLanguage("json", json);
-hljs.registerLanguage("xml", xml);
-hljs.registerLanguage("html", xml);
-hljs.registerLanguage("css", css);
-hljs.registerLanguage("python", python);
-hljs.registerLanguage("rust", rust);
-hljs.registerLanguage("bash", bash);
-hljs.registerLanguage("yaml", yaml);
-hljs.registerLanguage("markdown", markdown);
-hljs.registerLanguage("sql", sql);
-hljs.registerLanguage("ini", ini);
-hljs.registerLanguage("diff", diff);
-hljs.registerLanguage("go", go);
-hljs.registerLanguage("java", java);
-hljs.registerLanguage("csharp", csharp);
-hljs.registerLanguage("cpp", cpp);
-hljs.registerLanguage("powershell", powershell);
+function getWorker(): Worker {
+  if (!worker) {
+    worker = new Worker(
+      new URL("../workers/highlight.worker.ts", import.meta.url),
+      { type: "module" },
+    );
+    worker.onmessage = (e: MessageEvent<{ html: string | null; id: number }>) => {
+      const cb = pending.get(e.data.id);
+      if (cb) {
+        pending.delete(e.data.id);
+        cb(e.data.html);
+      }
+    };
+  }
+  return worker;
+}
 
-const extToLang: Record<string, string> = {
-  js: "javascript", jsx: "javascript", mjs: "javascript",
-  ts: "typescript", tsx: "typescript",
-  json: "json", jsonc: "json",
-  html: "html", htm: "html", svg: "xml", xml: "xml",
-  css: "css", scss: "css",
-  py: "python",
-  rs: "rust",
-  sh: "bash", bash: "bash", zsh: "bash",
-  yml: "yaml", yaml: "yaml",
-  md: "markdown",
-  sql: "sql",
-  ini: "ini", cfg: "ini", conf: "ini", env: "ini", toml: "ini",
-  diff: "diff", patch: "diff",
-  go: "go",
-  java: "java",
-  cs: "csharp",
-  c: "cpp", cpp: "cpp", h: "cpp", hpp: "cpp",
-  ps1: "powershell", psm1: "powershell",
-};
+function highlightAsync(content: string, ext: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const id = nextId++;
+    pending.set(id, resolve);
+    getWorker().postMessage({ content, ext, id });
+  });
+}
 
 interface CodePreviewProps {
   content: string;
@@ -68,67 +35,46 @@ interface CodePreviewProps {
 }
 
 export function CodePreview({ content, ext }: CodePreviewProps) {
-  const highlighted = useMemo(() => {
-    const lang = extToLang[ext];
-    if (lang) {
-      try {
-        return hljs.highlight(content, { language: lang }).value;
-      } catch {
-        return null;
+  const [highlighted, setHighlighted] = useState<string | null>(null);
+  const versionRef = useRef(0);
+
+  useEffect(() => {
+    const version = ++versionRef.current;
+    setHighlighted(null); // Show plain text immediately
+
+    highlightAsync(content, ext).then((html) => {
+      // Only apply if this is still the current content
+      if (version === versionRef.current) {
+        setHighlighted(html);
       }
-    }
-    // Auto-detect
-    try {
-      const result = hljs.highlightAuto(content);
-      if (result.relevance > 5) return result.value;
-    } catch {}
-    return null;
+    });
   }, [content, ext]);
 
-  if (highlighted) {
-    return (
-      <>
-        <style>{hljsTheme}</style>
-        <pre
-          style={{
-            fontFamily: "Cascadia Code, Cascadia Mono, Consolas, monospace",
-            fontSize: "12px",
-            lineHeight: 1.6,
-            padding: "16px 20px",
-            margin: 0,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-all",
-          }}
-        >
-          <code
-            className="hljs"
-            dangerouslySetInnerHTML={{ __html: highlighted }}
-          />
-        </pre>
-      </>
-    );
-  }
-
-  // Fallback: plain text
   return (
-    <pre
-      style={{
-        fontFamily: "Cascadia Code, Cascadia Mono, Consolas, monospace",
-        fontSize: "12px",
-        color: "rgba(255,255,255,0.75)",
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-all",
-        lineHeight: 1.6,
-        padding: "16px 20px",
-        margin: 0,
-      }}
-    >
-      {content}
-    </pre>
+    <>
+      {highlighted && <style>{hljsTheme}</style>}
+      <pre
+        style={{
+          fontFamily: "Cascadia Code, Cascadia Mono, Consolas, monospace",
+          fontSize: "12px",
+          lineHeight: 1.6,
+          padding: "16px 20px",
+          margin: 0,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-all",
+          color: highlighted ? undefined : "rgba(255,255,255,0.75)",
+        }}
+      >
+        {highlighted ? (
+          <code className="hljs" dangerouslySetInnerHTML={{ __html: highlighted }} />
+        ) : (
+          content
+        )}
+      </pre>
+    </>
   );
 }
 
-// Dark theme matching Windows Terminal / VS Code dark
 const hljsTheme = `
 .hljs {
   color: #d4d4d4;
@@ -162,8 +108,6 @@ const hljsTheme = `
 .hljs-property { color: #9cdcfe; }
 .hljs-meta { color: #569cd6; }
 .hljs-operator { color: #d4d4d4; }
-.hljs-deletion { color: #ce9178; background: rgba(255,0,0,0.1); }
-.hljs-addition { background: rgba(0,255,0,0.1); }
 .hljs-section { color: #dcdcaa; }
 .hljs-bullet { color: #569cd6; }
 .hljs-emphasis { font-style: italic; }

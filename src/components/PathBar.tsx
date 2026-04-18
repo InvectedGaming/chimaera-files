@@ -56,7 +56,7 @@ export function PathBar({
   }, [editValue, currentPath, onNavigate]);
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: "8px", height: "52px", padding: "4px 16px 8px", background: "rgba(32,32,32,0.7)", borderBottom: "1px solid rgba(255,255,255,0.07)" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: "8px", height: "52px", padding: "4px 16px 8px", background: "rgba(24,24,24,0.92)", borderBottom: "1px solid rgba(255,255,255,0.07)" }}>
       <NavButton onClick={onGoBack} disabled={!canGoBack} title="Back (Alt+Left)">
         <ArrowLeft size={18} strokeWidth={1.5} />
       </NavButton>

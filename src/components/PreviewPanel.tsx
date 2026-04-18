@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { readFileText, writeFileText, getFileMetadata, type FileMetadataInfo } from "../api";
+import { writeFileText, getFileMetadata, type FileMetadataInfo } from "../api";
 import { useFileUrl } from "../hooks/useFileUrl";
 import { CodePreview } from "./CodePreview";
 import { MarkdownPreview } from "./MarkdownPreview";
@@ -76,7 +76,6 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
   useEffect(() => {
     requestAnimationFrame(() => {
       setPhase("modal-in");
-      contentRef.current?.focus();
       setTimeout(() => setPhase("visible"), 150);
     });
   }, []);
@@ -137,10 +136,30 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
         return;
       }
 
-      // Arrow keys, Page, Home, End: let browser scroll the focused content div naturally
-      if (["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End"].includes(e.key)) {
-        e.stopPropagation(); // Stop App.tsx from handling
-        // Don't preventDefault — let the browser scroll the focused contentRef
+      // Arrow keys: scroll preview content
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const el = contentRef.current;
+        if (el) {
+          el.scrollTop += e.key === "ArrowDown" ? 40 : -40;
+          // Force repaint in WebView2
+          void el.offsetHeight;
+        }
+        return;
+      }
+      if (e.key === "PageDown" || e.key === "PageUp") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const el = contentRef.current;
+        if (el) el.scrollTop += e.key === "PageDown" ? 300 : -300;
+        return;
+      }
+      if (e.key === "Home" || e.key === "End") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const el = contentRef.current;
+        if (el) el.scrollTop = e.key === "Home" ? 0 : el.scrollHeight;
         return;
       }
 
@@ -156,12 +175,20 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
   }, []); // Empty deps — all values read from refs
 
   useEffect(() => {
-    getFileMetadata(path).then(setMeta).catch(() => {});
+    getFileMetadata(path).then((m) => {
+      setMeta(m);
+      // Focus for non-text files (images, etc.) after metadata loads
+      requestAnimationFrame(() => contentRef.current?.focus());
+    }).catch(() => {});
     if (!isKnownBinary(ext)) {
-      readFileText(path)
+      // Load preview text (first 32KB for fast render)
+      import("../api").then(({ readFilePreview }) =>
+        readFilePreview(path, 32 * 1024)
+      )
         .then((text) => {
           setTextContent(text);
-          setEditedContent(text);
+          // Full content loaded lazily for editing
+          requestAnimationFrame(() => contentRef.current?.focus());
         })
         .catch(() => {
           setTextContent("[Unable to read file]");
@@ -181,11 +208,18 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
     }
   }, [path, editedContent]);
 
-  const handleStartEditing = useCallback(() => {
-    // Capture scroll position before switching to editor
+  const handleStartEditing = useCallback(async () => {
+    // Load full file content for editing
     const scrollTop = contentRef.current?.scrollTop ?? 0;
+    try {
+      const { readFileText } = await import("../api");
+      const fullText = await readFileText(path);
+      setEditedContent(fullText);
+      setTextContent(fullText);
+    } catch {
+      setEditedContent(textContent ?? "");
+    }
     setEditing(true);
-    setEditedContent(textContent ?? "");
     setTimeout(() => {
       if (textareaRef.current) {
         textareaRef.current.focus();
@@ -208,8 +242,6 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
   isTextRef.current = isText;
   textContentRef.current = textContent;
 
-  const backdropVisible = phase !== "backdrop-in" && phase !== "backdrop-out";
-  const modalVisible = phase === "visible" || phase === "modal-in";
   const closing = phase === "modal-out" || phase === "backdrop-out";
 
   return (
@@ -250,7 +282,7 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
           WebkitBackdropFilter: "blur(12px)",
           animation: phase === "backdrop-out"
             ? "previewBackdropOut 0.12s ease-in forwards"
-            : backdropVisible
+            : phase === "modal-in"
               ? "previewBackdropIn 0.15s ease-out forwards"
               : undefined,
           opacity: phase === "backdrop-in" ? 0 : undefined,
@@ -272,7 +304,7 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
             boxShadow: "0 16px 64px rgba(0,0,0,0.5), 0 2px 8px rgba(0,0,0,0.3)",
             animation: phase === "modal-out"
               ? "previewModalOut 0.12s ease-in forwards"
-              : modalVisible
+              : phase === "modal-in"
                 ? "previewModalIn 0.18s ease-out forwards"
                 : undefined,
             opacity: phase === "backdrop-in" || phase === "backdrop-out" ? 0 : undefined,
@@ -343,6 +375,7 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
           {/* Content */}
           <div
             ref={contentRef}
+            data-preview-scroll
             tabIndex={0}
             style={{
               flex: 1,
@@ -350,6 +383,7 @@ export function PreviewPanel({ path, onClose }: PreviewPanelProps) {
               outline: "none",
               position: "relative",
               minHeight: 0,
+              maxHeight: "calc(80vh - 120px)",
             }}
           >
             {needsMediaUrl && !mediaUrl && !tooLarge && (

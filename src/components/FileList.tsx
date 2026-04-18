@@ -212,7 +212,7 @@ export function FileList({
   };
 
   return (
-    <div className={listClassName} style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0, overflow: "hidden", background: "rgba(25,25,25,0.75)" }}>
+    <div className={listClassName} style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0, overflow: "hidden", background: "rgba(20,20,20,0.92)" }}>
       {/* Column headers */}
       <div
         style={{
@@ -278,7 +278,7 @@ export function FileList({
           padding: "0 14px",
           margin: "0 8px",
           borderTop: "1px solid rgba(255,255,255,0.07)",
-          background: "rgba(32,32,32,0.7)",
+          background: "rgba(24,24,24,0.92)",
           fontSize: "12px",
           color: "rgba(255,255,255,0.6)",
           flexShrink: 0,
