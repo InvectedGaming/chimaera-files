@@ -1,0 +1,15 @@
+# Normalize line endings in the repo so Windows checkouts don't pollute diffs.
+* text=auto eol=lf
+
+# Lockfiles and generated schemas stay LF regardless of local git config.
+bun.lock text eol=lf
+Cargo.lock text eol=lf
+src-tauri/gen/schemas/*.json text eol=lf
+
+# Binary files — don't touch.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.woff binary
+*.woff2 binary
