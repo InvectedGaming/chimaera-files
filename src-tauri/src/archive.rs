@@ -157,9 +157,17 @@ pub fn extract_all(archive_path: &str, dest_dir: &str) -> Result<String, String>
     std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
 
     let mut count = 0;
+    let mut skipped = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        let out_path = dest.join(entry.name());
+
+        // Reject entries whose path escapes the destination (zip slip).
+        // `enclosed_name` returns None for absolute paths or ones containing `..`.
+        let Some(rel) = entry.enclosed_name() else {
+            skipped += 1;
+            continue;
+        };
+        let out_path = dest.join(rel);
 
         if entry.is_dir() {
             std::fs::create_dir_all(&out_path).map_err(|e| e.to_string())?;
@@ -173,5 +181,9 @@ pub fn extract_all(archive_path: &str, dest_dir: &str) -> Result<String, String>
         }
     }
 
-    Ok(format!("Extracted {} files to {}", count, dest_dir))
+    if skipped > 0 {
+        Ok(format!("Extracted {} files to {} ({} unsafe entries skipped)", count, dest_dir, skipped))
+    } else {
+        Ok(format!("Extracted {} files to {}", count, dest_dir))
+    }
 }

@@ -129,7 +129,7 @@ pub async fn get_folder_sizes(
 
     // Try index first for all paths
     {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db_lock();
         for path in &paths {
             if let Ok(Some(stats)) = chimaera_indexer::stats::get_folder_stats(&conn, path) {
                 result.insert(path.clone(), stats.total_size as u64);
@@ -285,7 +285,7 @@ pub fn search_files(
     limit: Option<usize>,
     state: State<AppState>,
 ) -> Result<Vec<FileItem>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db_lock();
     let results = chimaera_indexer::fts::search(&conn, &query, limit.unwrap_or(50))
         .map_err(|e| e.to_string())?;
 
@@ -308,7 +308,7 @@ pub fn get_folder_stats(
     path: String,
     state: State<AppState>,
 ) -> Result<Option<FolderStatsResult>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db_lock();
     let stats =
         chimaera_indexer::stats::get_folder_stats(&conn, &path).map_err(|e| e.to_string())?;
 
@@ -343,17 +343,26 @@ pub fn open_file(path: String) -> Result<(), String> {
 /// Open the "Open with" dialog for a file (Windows).
 #[tauri::command]
 pub fn open_file_with(path: String) -> Result<(), String> {
+    // Only allow paths that resolve to an existing, regular file. This stops a
+    // compromised frontend from passing arbitrary strings as process arguments.
+    let canonical = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    let meta = std::fs::metadata(&canonical).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("open_file_with requires a regular file".to_string());
+    }
+
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("rundll32")
-            .args(["shell32.dll,OpenAs_RunDLL", &path.replace('/', "\\")])
+            .arg("shell32.dll,OpenAs_RunDLL")
+            .arg(canonical.as_os_str())
             .spawn()
             .map_err(|e| e.to_string())?;
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
     {
-        open::that(&path).map_err(|e| e.to_string())
+        open::that(&canonical).map_err(|e| e.to_string())
     }
 }
 
@@ -527,7 +536,7 @@ pub struct IndexStatus {
 /// Get index status per drive.
 #[tauri::command]
 pub fn get_index_status(state: State<AppState>) -> Result<IndexStatus, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db_lock();
     let cfg = settings::load();
 
     let total_files: i64 = conn
@@ -683,8 +692,15 @@ pub async fn toggle_drive_index(
 
         Ok(format!("Indexing started for {}", drive))
     } else {
+        // Signal the journal watcher thread to exit before tearing down its data
+        if let Ok(mut map) = state.journal_watchers.lock() {
+            if let Some(stop) = map.remove(&drive_normalized) {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
         // Remove synchronously — it's fast
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db_lock();
         let _ = conn.execute_batch("COMMIT");
         conn.execute_batch("PRAGMA foreign_keys = OFF").map_err(|e| e.to_string())?;
         conn.execute(
@@ -713,7 +729,7 @@ pub async fn start_index(path: String, state: State<'_, AppState>) -> Result<Str
         _ => return Err(format!("Not a directory: {}", path)),
     }
 
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db_lock();
 
     let stats = chimaera_indexer::walker::index_directory(&conn, &target)
         .map_err(|e| e.to_string())?;
@@ -730,7 +746,7 @@ pub async fn start_index(path: String, state: State<'_, AppState>) -> Result<Str
 /// Remove all indexed data for a root path.
 #[tauri::command]
 pub fn remove_index(path: String, state: State<AppState>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db_lock();
     let p = path.replace('\\', "/");
 
     conn.execute(
@@ -753,7 +769,8 @@ pub fn remove_index(path: String, state: State<AppState>) -> Result<(), String> 
 pub fn copy_files(sources: Vec<String>, dest_dir: String, state: State<AppState>) -> file_ops::OpResult {
     let result = file_ops::copy_files(&sources, &dest_dir);
     if result.success {
-        if let Ok(conn) = state.db.lock() {
+        {
+            let conn = state.db_lock();
             file_ops::log_operation(&conn, "copy", &serde_json::json!({ "sources": sources, "dest": dest_dir }));
         }
     }
@@ -764,7 +781,8 @@ pub fn copy_files(sources: Vec<String>, dest_dir: String, state: State<AppState>
 pub fn move_files(sources: Vec<String>, dest_dir: String, state: State<AppState>) -> file_ops::OpResult {
     let result = file_ops::move_files(&sources, &dest_dir);
     if result.success {
-        if let Ok(conn) = state.db.lock() {
+        {
+            let conn = state.db_lock();
             file_ops::log_operation(&conn, "move", &serde_json::json!({ "sources": sources, "dest": dest_dir }));
         }
     }
@@ -775,7 +793,8 @@ pub fn move_files(sources: Vec<String>, dest_dir: String, state: State<AppState>
 pub fn delete_files(paths: Vec<String>, state: State<AppState>) -> file_ops::OpResult {
     let result = file_ops::delete_files(&paths);
     if result.success {
-        if let Ok(conn) = state.db.lock() {
+        {
+            let conn = state.db_lock();
             file_ops::log_operation(&conn, "delete", &serde_json::json!({ "paths": paths }));
         }
     }
@@ -786,7 +805,8 @@ pub fn delete_files(paths: Vec<String>, state: State<AppState>) -> file_ops::OpR
 pub fn rename_file(path: String, new_name: String, state: State<AppState>) -> file_ops::OpResult {
     let result = file_ops::rename_file(&path, &new_name);
     if result.success {
-        if let Ok(conn) = state.db.lock() {
+        {
+            let conn = state.db_lock();
             file_ops::log_operation(&conn, "rename", &serde_json::json!({ "path": path, "new_name": new_name }));
         }
     }
@@ -800,7 +820,7 @@ pub fn create_folder(parent_dir: String, name: String) -> file_ops::OpResult {
 
 #[tauri::command]
 pub fn undo_last_operation(state: State<AppState>) -> Result<String, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db_lock();
 
     let row: Option<(i64, String, String)> = conn
         .query_row(

@@ -134,8 +134,26 @@ pub fn delete_files(paths: &[String]) -> OpResult {
     }
 }
 
+/// Reject names that contain path separators or traversal components so
+/// `rename` / `create_folder` can't silently write outside the parent.
+fn is_safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+}
+
 /// Rename a file or directory.
 pub fn rename_file(path: &str, new_name: &str) -> OpResult {
+    if !is_safe_name(new_name) {
+        return OpResult {
+            success: false,
+            message: format!("Invalid file name: '{}'", new_name),
+        };
+    }
+
     let src = PathBuf::from(path);
     let parent = src.parent().unwrap_or(Path::new(""));
     let dest = parent.join(new_name);
@@ -161,6 +179,13 @@ pub fn rename_file(path: &str, new_name: &str) -> OpResult {
 
 /// Create a new folder.
 pub fn create_folder(parent_dir: &str, name: &str) -> OpResult {
+    if !is_safe_name(name) {
+        return OpResult {
+            success: false,
+            message: format!("Invalid folder name: '{}'", name),
+        };
+    }
+
     let path = PathBuf::from(parent_dir).join(name);
     match std::fs::create_dir(&path) {
         Ok(_) => OpResult {

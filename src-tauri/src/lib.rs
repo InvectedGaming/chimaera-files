@@ -6,8 +6,10 @@ mod state;
 mod terminal;
 mod watcher;
 
-use state::AppState;
+use state::{AppState, JournalWatchers};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::Manager;
 
 pub fn run() {
@@ -21,6 +23,7 @@ pub fn run() {
     }
 
     let app_state = AppState::new(&db_path).expect("failed to initialize database");
+    let watchers_for_startup = app_state.journal_watchers.clone();
     let db_path_for_startup = db_path.clone();
 
     tauri::Builder::default()
@@ -62,8 +65,9 @@ pub fn run() {
             // Start journal watchers for enabled drives
             let db_path_clone = db_path_for_startup.clone();
             let app_handle = app.handle().clone();
+            let watchers_clone = watchers_for_startup.clone();
             std::thread::spawn(move || {
-                start_journal_watchers(&db_path_clone, app_handle);
+                start_journal_watchers(&db_path_clone, app_handle, watchers_clone);
             });
 
             Ok(())
@@ -112,7 +116,11 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn start_journal_watchers(db_path: &PathBuf, app_handle: tauri::AppHandle) {
+fn start_journal_watchers(
+    db_path: &PathBuf,
+    app_handle: tauri::AppHandle,
+    watchers: JournalWatchers,
+) {
     use tauri::Emitter;
 
     let cfg = settings::load();
@@ -159,6 +167,16 @@ fn start_journal_watchers(db_path: &PathBuf, app_handle: tauri::AppHandle) {
         let app = app_handle.clone();
         let drive_clone = drive.clone();
 
+        let stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        // If a watcher is already registered for this drive (e.g. from a prior
+        // enable), signal it to stop before replacing the entry.
+        if let Ok(mut map) = watchers.lock() {
+            if let Some(prev) = map.insert(drive.clone(), stop.clone()) {
+                prev.store(true, Ordering::Relaxed);
+            }
+        }
+        let stop_for_thread = stop.clone();
+
         std::thread::spawn(move || {
             let app_for_cb = app.clone();
             let drive_for_cb = drive_clone.clone();
@@ -175,6 +193,7 @@ fn start_journal_watchers(db_path: &PathBuf, app_handle: tauri::AppHandle) {
                         }),
                     );
                 })),
+                stop_for_thread,
             );
         });
     }

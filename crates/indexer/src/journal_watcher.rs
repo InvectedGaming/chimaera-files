@@ -3,18 +3,25 @@
 use crate::usn::{self, UsnEntry, VolumeHandle};
 use rusqlite::{params, Connection};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// Callback for notifying the app that the index was updated.
 pub type OnUpdateCallback = Box<dyn Fn(u64) + Send>; // (num_changes)
 
+/// Shutdown handle for a running watcher. Flip to `true` to stop the loop.
+pub type StopFlag = Arc<AtomicBool>;
+
 /// Start the journal watcher for a volume. Blocks the calling thread.
 /// `volume_root` should be like "C:/" or "E:/".
 /// `on_update` is called when changes are applied to the DB.
+/// The watcher exits cleanly when `stop` is set to `true`.
 pub fn run_watcher(
     db_path: &Path,
     volume_root: &str,
     on_update: Option<OnUpdateCallback>,
+    stop: StopFlag,
 ) {
     let drive_letter = volume_root.chars().next().unwrap_or('C');
 
@@ -65,7 +72,7 @@ pub fn run_watcher(
 
     eprintln!("Journal watcher {}: watching for changes...", volume_root);
 
-    loop {
+    while !stop.load(Ordering::Relaxed) {
         match usn::read_entries(&handle, current_usn, journal_info.journal_id) {
             Ok((entries, next_usn)) => {
                 if !entries.is_empty() {
@@ -104,6 +111,8 @@ pub fn run_watcher(
 
         std::thread::sleep(Duration::from_millis(500));
     }
+
+    eprintln!("Journal watcher {}: stopped", volume_root);
 }
 
 /// Apply a batch of USN close entries to the database.

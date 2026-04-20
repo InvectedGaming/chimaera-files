@@ -7,7 +7,7 @@ pub type TerminalId = u32;
 
 struct TerminalSession {
     writer: Box<dyn Write + Send>,
-    _child: Box<dyn portable_pty::Child + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
 pub struct TerminalManager {
@@ -67,7 +67,7 @@ impl TerminalManager {
             id,
             TerminalSession {
                 writer,
-                _child: child,
+                child,
             },
         );
 
@@ -86,7 +86,12 @@ impl TerminalManager {
     }
 
     pub fn close(&mut self, id: TerminalId) {
-        self.sessions.remove(&id);
+        if let Some(mut session) = self.sessions.remove(&id) {
+            // Killing the child closes the slave PTY, which EOFs the reader
+            // thread so it can exit instead of blocking on `read` forever.
+            let _ = session.child.kill();
+            let _ = session.child.wait();
+        }
     }
 }
 
