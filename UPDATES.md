@@ -30,7 +30,7 @@ const REPO_NAME = "chimaera-files";
 
 Each GitHub Release in any channel must have an installer asset whose filename ends in `-setup.exe` (or just `.exe` / `.msi` as fallback). The frontend picks it up by name — everything else in the release is ignored.
 
-The NSIS bundler produces this automatically: `bun run tauri build` → `src-tauri/target/release/bundle/nsis/Chimaera Files_0.1.0_x64-setup.exe`.
+The NSIS bundler produces this automatically: `bun run tauri build` → `target/release/bundle/nsis/Chimaera Files_0.1.0_x64-setup.exe` (workspace target dir, at repo root — not under `src-tauri/`).
 
 ## Publishing a release
 
@@ -67,7 +67,7 @@ jobs:
       - id: find
         shell: pwsh
         run: |
-          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $exe = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           echo "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
 
       # Tag handling: semver tag → new stable Release; branch push →
