@@ -1,6 +1,6 @@
 {
   "productName": "Chimaera Files",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "co.chimaera.files",
   "build": {
     "beforeDevCommand": "bun run dev",
