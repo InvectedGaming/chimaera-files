@@ -181,7 +181,18 @@ pub fn index_directory_with_progress(
 fn normalize_path(path: &Path) -> String {
     let s = path.to_string_lossy();
     let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-    s.replace('\\', "/")
+    let s = s.replace('\\', "/");
+    // Trim a trailing slash so a drive root like `\\?\C:\` becomes `"C:"`
+    // rather than `"C:/"`. Every consumer of stored paths — compute_for_subtree,
+    // get_index_status, the shell-integration command, the diagnostic — trims
+    // the trailing slash before comparing, so we have to match that format
+    // at write time or lookups for the root silently miss. Keep it at length
+    // 1 for non-Windows rare cases like `"/"`.
+    if s.len() > 1 {
+        s.trim_end_matches('/').to_string()
+    } else {
+        s
+    }
 }
 
 fn to_unix_ms(t: SystemTime) -> Option<i64> {
