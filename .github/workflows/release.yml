@@ -1,0 +1,77 @@
+name: Release
+
+# Triggers
+#   push a tag `v*`  → publish a `latest` Release (stable channel)
+#   push to `beta`    → move the `beta` tag to HEAD and update the Release
+#   push to `dev`     → move the `dev` tag to HEAD and update the Release
+#   workflow_dispatch → manual run for debugging
+on:
+  push:
+    tags: ["v*"]
+    branches: [beta, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to push tags and publish Releases
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so `git tag -f` works
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend deps
+        run: bun install
+
+      - name: Build installer
+        run: bun run tauri build
+
+      - name: Locate installer
+        id: find
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (-not $exe) { throw "No NSIS installer produced — check tauri build output" }
+          echo "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          echo "name=$($exe.Name)" >> $env:GITHUB_OUTPUT
+          echo "Found installer: $($exe.Name) ($([math]::Round($exe.Length / 1MB, 1)) MB)"
+
+      # For branch builds, move the channel tag to this commit before the
+      # Release step runs. `softprops/action-gh-release` then updates the
+      # Release that points at that tag (creating it if it doesn't exist).
+      - name: Move channel tag (beta / dev only)
+        if: github.ref_type == 'branch' && (github.ref_name == 'beta' || github.ref_name == 'dev')
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f ${{ github.ref_name }} ${{ github.sha }}
+          git push -f origin ${{ github.ref_name }}
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Chimaera ${{ github.ref_name }}
+          files: ${{ steps.find.outputs.path }}
+          # beta / dev channels are prereleases; v* tags are stable.
+          prerelease: ${{ github.ref_type == 'branch' }}
+          # Only stable `v*` tags get the GitHub `latest` flag, which is
+          # what the app's stable-channel updater URL resolves to.
+          make_latest: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+          generate_release_notes: ${{ github.ref_type == 'tag' }}
+          body: |
+            ${{ github.ref_type == 'branch' && format('Automated build from `{0}` branch at commit {1}.', github.ref_name, github.sha) || '' }}
