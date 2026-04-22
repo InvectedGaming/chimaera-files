@@ -109,21 +109,27 @@ fn run(
 
         eprintln!("[worker] starting scan for {}", drive);
 
-        // Pause the realtime watcher for this drive — the walker is about
-        // to do a ton of writes and any concurrent upserts from the watcher
-        // would lose the DB write-lock race (cost us an entire day of
-        // debugging the first time).
-        let pause_flag = {
+        // Pause EVERY drive's watcher for the duration of the scan, not
+        // just this drive's. Once C: finishes and we move on to E:, the
+        // C: watcher un-pauses and starts flushing queued filesystem
+        // events — those writes then race E:'s `compute_for_subtree` for
+        // the DB lock. Cross-drive pause closes that hole.
+        let all_pause_flags: Vec<Arc<AtomicBool>> = {
             let mut map = pauses.lock().expect("drive_pause_flags poisoned");
+            // Make sure this drive has a flag even if no watcher spawned yet.
             map.entry(drive.clone())
-                .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-                .clone()
+                .or_insert_with(|| Arc::new(AtomicBool::new(false)));
+            map.values().cloned().collect()
         };
-        pause_flag.store(true, Ordering::Relaxed);
+        for flag in &all_pause_flags {
+            flag.store(true, Ordering::Relaxed);
+        }
 
         run_job(&db_path, &app, &active, &drive, cancel);
 
-        pause_flag.store(false, Ordering::Relaxed);
+        for flag in &all_pause_flags {
+            flag.store(false, Ordering::Relaxed);
+        }
         eprintln!("[worker] finished scan for {}", drive);
     }
 }
