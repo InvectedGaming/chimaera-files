@@ -38,12 +38,6 @@ interface IndexProgress {
   message?: string;
 }
 
-function formatPct(pct: number): string {
-  if (pct < 0.1) return "<0.1%";
-  if (pct >= 99.95) return "~100%";
-  return `${pct.toFixed(1)}%`;
-}
-
 export function Settings({ onBack }: SettingsProps) {
   const [settings, setSettings] = useState<SettingsType | null>(null);
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);

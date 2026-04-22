@@ -417,19 +417,28 @@ function FileRow({
       }
     >
       <div style={{ width: colWidths.name, flexShrink: 0, minWidth: 0, overflow: "hidden", display: "flex", alignItems: "center", gap: "12px" }}>
-        <Icon
-          size={18}
-          strokeWidth={1.5}
-          className={clsx(
-            "shrink-0",
+        {/* lucide-react 1.8 doesn't type `style` on its icons; wrap the
+          * glow in a span so the filter applies without fighting TS. */}
+        <span
+          style={
             hasSubtreeMatch
-              ? "text-[#60cdff]"
-              : item.is_directory
-                ? "text-[#f2c55c]"
-                : "text-win-text-secondary",
-          )}
-          style={hasSubtreeMatch ? { filter: "drop-shadow(0 0 4px rgba(96,205,255,0.6))" } : undefined}
-        />
+              ? { display: "inline-flex", filter: "drop-shadow(0 0 4px rgba(96,205,255,0.6))" }
+              : undefined
+          }
+        >
+          <Icon
+            size={18}
+            strokeWidth={1.5}
+            className={clsx(
+              "shrink-0",
+              hasSubtreeMatch
+                ? "text-[#60cdff]"
+                : item.is_directory
+                  ? "text-[#f2c55c]"
+                  : "text-win-text-secondary",
+            )}
+          />
+        </span>
         {renaming ? (
           <input
             autoFocus
