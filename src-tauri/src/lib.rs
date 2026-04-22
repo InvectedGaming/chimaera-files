@@ -132,10 +132,12 @@ pub fn run() {
                 let state: tauri::State<AppState> = app.state();
 
                 // Defensive: a drive marked `fully_scanned` but whose
-                // folder_stats row is missing is lying — the earlier
-                // global-wipe `compute_all` bug could leave drives in this
-                // zombie state. Drop the stale flag so the Auto branch
-                // below re-enqueues it.
+                // folder_stats row is missing (or has `file_count = 0`) is
+                // lying — the earlier global-wipe `compute_all` bug could
+                // leave drives in this zombie state, and an interrupted
+                // scan can leave a `folder_stats` row populated with zero
+                // counts. Drop the stale flag either way so the Auto
+                // branch below re-enqueues.
                 {
                     let mut cfg = settings::load();
                     let conn = state.db_lock();
@@ -143,19 +145,23 @@ pub fn run() {
                     cfg.fully_scanned_drives.retain(|d| {
                         let trimmed = d.replace('\\', "/");
                         let trimmed = trimmed.trim_end_matches('/');
-                        let has_stats: bool = conn
+                        let count: i64 = conn
                             .query_row(
-                                "SELECT 1 FROM folder_stats fs
+                                "SELECT fs.file_count FROM folder_stats fs
                                  JOIN files f ON f.id = fs.folder_id
-                                 WHERE f.path = ?1 LIMIT 1",
+                                 WHERE f.path = ?1",
                                 [trimmed],
-                                |_| Ok(true),
+                                |row| row.get(0),
                             )
-                            .unwrap_or(false);
-                        if !has_stats {
-                            eprintln!("Startup: clearing stale fully_scanned flag for {}", d);
+                            .unwrap_or(0);
+                        let has_real_stats = count > 0;
+                        if !has_real_stats {
+                            eprintln!(
+                                "Startup: clearing stale fully_scanned flag for {} (file_count = {})",
+                                d, count
+                            );
                         }
-                        has_stats
+                        has_real_stats
                     });
                     if cfg.fully_scanned_drives.len() != before {
                         drop(conn);
