@@ -69,7 +69,11 @@ const shortcutGroups: ShortcutGroup[] = [
   {
     title: "Search",
     shortcuts: [
-      { keys: "/  or  Ctrl + F", description: "Focus search" },
+      { keys: "Type a letter", description: "Start type-ahead in current folder" },
+      { keys: "Tab (while typing)", description: "Cycle mode: smart → fuzzy → regex" },
+      { keys: "↑ / ↓ (while typing)", description: "Next / previous match" },
+      { keys: "Enter (while typing)", description: "Open current match" },
+      { keys: "/  or  Ctrl + F", description: "Focus global search" },
       { keys: "Ctrl + L", description: "Focus path bar" },
       { keys: "Esc", description: "Close search / preview / menu" },
     ],

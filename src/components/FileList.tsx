@@ -47,6 +47,9 @@ interface FileListProps {
   onRename?: (path: string, newName: string) => void;
   onCancelRename?: () => void;
   className?: string;
+  /** Map of direct-child folder name -> count of deep matches. Folders
+   *  present in this map get a "+N" badge and an accent-tinted icon. */
+  subtreeCounts?: Record<string, number>;
 }
 
 type SortKey = "name" | "size" | "modified" | "type";
@@ -63,6 +66,7 @@ export function FileList({
   onRename,
   onCancelRename,
   className: listClassName,
+  subtreeCounts,
 }: FileListProps) {
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
@@ -264,6 +268,9 @@ export function FileList({
               folderSize={folderSizes[item.path]}
               colWidths={colWidths}
               animDelay={i < 30 ? i * 12 : undefined}
+              subtreeMatchCount={
+                item.is_directory ? subtreeCounts?.[item.name] : undefined
+              }
             />
           ))
         )}
@@ -345,6 +352,7 @@ function FileRow({
   folderSize,
   colWidths,
   animDelay,
+  subtreeMatchCount,
 }: {
   item: FileItem;
   selected: boolean;
@@ -356,9 +364,11 @@ function FileRow({
   folderSize?: number;
   colWidths: { name: number; size: number; modified: number; type: number };
   animDelay?: number;
+  subtreeMatchCount?: number;
 }) {
   const iconName = getFileIcon(item);
   const Icon = iconMap[iconName] ?? File;
+  const hasSubtreeMatch = subtreeMatchCount !== undefined && subtreeMatchCount > 0;
 
   const displaySize = item.is_directory
     ? folderSize !== undefined
@@ -412,8 +422,13 @@ function FileRow({
           strokeWidth={1.5}
           className={clsx(
             "shrink-0",
-            item.is_directory ? "text-[#f2c55c]" : "text-win-text-secondary",
+            hasSubtreeMatch
+              ? "text-[#60cdff]"
+              : item.is_directory
+                ? "text-[#f2c55c]"
+                : "text-win-text-secondary",
           )}
+          style={hasSubtreeMatch ? { filter: "drop-shadow(0 0 4px rgba(96,205,255,0.6))" } : undefined}
         />
         {renaming ? (
           <input
@@ -452,7 +467,30 @@ function FileRow({
             }}
           />
         ) : (
-          <span className="truncate">{item.name}</span>
+          <>
+            <span className="truncate">{item.name}</span>
+            {hasSubtreeMatch && (
+              <span
+                title={`${subtreeMatchCount} match${subtreeMatchCount === 1 ? "" : "es"} inside`}
+                style={{
+                  flexShrink: 0,
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  color: "#60cdff",
+                  background: "rgba(96,205,255,0.12)",
+                  border: "1px solid rgba(96,205,255,0.25)",
+                  borderRadius: "9px",
+                  padding: "1px 6px",
+                  lineHeight: 1.3,
+                  letterSpacing: "0.3px",
+                }}
+              >
+                {subtreeMatchCount! >= 1000
+                  ? `${Math.floor(subtreeMatchCount! / 1000)}k+`
+                  : `+${subtreeMatchCount}`}
+              </span>
+            )}
+          </>
         )}
       </div>
       <div style={{ width: "8px", flexShrink: 0 }} />

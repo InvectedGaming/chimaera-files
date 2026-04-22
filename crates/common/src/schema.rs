@@ -33,10 +33,13 @@ CREATE TABLE IF NOT EXISTS folder_stats (
     computed_at        INTEGER NOT NULL
 );
 
+-- Trigram tokenizer gives us true substring match: `eadm` finds `readme.md`.
+-- Requires SQLite 3.34+; the bundled rusqlite ships 3.4x.
+-- Migration to this is handled in `db::open` via the `user_version` pragma.
 CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
     name, path, extension,
     content='files', content_rowid='id',
-    tokenize='unicode61 remove_diacritics 2'
+    tokenize='trigram'
 );
 
 CREATE TABLE IF NOT EXISTS tags (

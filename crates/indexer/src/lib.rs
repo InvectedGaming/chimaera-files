@@ -1,5 +1,6 @@
 pub mod db;
 pub mod fts;
+pub mod search;
 pub mod stats;
 pub mod walker;
 

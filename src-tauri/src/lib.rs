@@ -1,12 +1,16 @@
 mod archive;
 mod commands;
+mod drive_watcher;
 mod file_ops;
+mod indexer_worker;
 pub mod settings;
+#[cfg(windows)]
+mod shell_integration;
 mod state;
 mod terminal;
 mod watcher;
 
-use state::{AppState, JournalWatchers};
+use state::AppState;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -22,17 +26,35 @@ pub fn run() {
         std::fs::create_dir_all(parent).ok();
     }
 
-    let app_state = AppState::new(&db_path).expect("failed to initialize database");
+    let (app_state, index_rx) =
+        AppState::new(&db_path).expect("failed to initialize database");
+
+    // If the process was launched from the shell with a path argument
+    // (e.g. via our "Open in Chimaera" right-click verb), stash it so the
+    // frontend can pick it up on mount.
+    if let Some(path) = std::env::args().skip(1).find(|a| !a.starts_with('-')) {
+        if let Ok(mut slot) = app_state.pending_open_path.lock() {
+            *slot = Some(path);
+        }
+    }
+
     let watchers_for_startup = app_state.journal_watchers.clone();
     let db_path_for_startup = db_path.clone();
+    let db_path_for_worker = db_path.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // When a second instance is launched, focus the existing window
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Focus the existing window and, if launched with a path argument
+            // (e.g. from the `OpenInChimaera` shell verb), tell the frontend
+            // to navigate there.
+            use tauri::Emitter;
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
                 let _ = w.set_focus();
+            }
+            if let Some(path) = args.iter().skip(1).find(|a| !a.starts_with('-')) {
+                let _ = app.emit("open-path", path.clone());
             }
         }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -51,24 +73,173 @@ pub fn run() {
                 apply_mica(&window, Some(true)).ok();
             }
 
-            // Register Win+E global hotkey
+            // Register global hotkeys.
+            //   Win+E         → focus main window
+            //   Ctrl+Shift+K  → toggle the launcher popup (Spotlight-style)
             {
                 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
                 let win_for_hotkey = window.clone();
-                let shortcut: Shortcut = "Super+E".parse().unwrap();
-                let _ = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, _event| {
+                let main_shortcut: Shortcut = "Super+E".parse().unwrap();
+                let _ = app.global_shortcut().on_shortcut(main_shortcut, move |_app, _shortcut, _event| {
                     let _ = win_for_hotkey.show();
                     let _ = win_for_hotkey.set_focus();
                 });
+
+                let app_for_launcher = app.handle().clone();
+                let launcher_shortcut: Shortcut = "Ctrl+Shift+K".parse().unwrap();
+                let _ = app.global_shortcut().on_shortcut(
+                    launcher_shortcut,
+                    move |_app, _shortcut, event| {
+                        // `on_shortcut` fires for both Pressed and Released —
+                        // only toggle on Pressed so one key stroke = one toggle.
+                        use tauri_plugin_global_shortcut::ShortcutState;
+                        if event.state() != ShortcutState::Pressed {
+                            return;
+                        }
+                        if let Some(lw) = app_for_launcher.get_webview_window("launcher") {
+                            if lw.is_visible().unwrap_or(false) {
+                                let _ = lw.hide();
+                            } else {
+                                let _ = lw.show();
+                                let _ = lw.set_focus();
+                            }
+                        }
+                    },
+                );
             }
 
-            // Start journal watchers for enabled drives
-            let db_path_clone = db_path_for_startup.clone();
-            let app_handle = app.handle().clone();
-            let watchers_clone = watchers_for_startup.clone();
-            std::thread::spawn(move || {
-                start_journal_watchers(&db_path_clone, app_handle, watchers_clone);
-            });
+            // Start the serial indexer worker. One drive scans at a time
+            // so multiple `toggle_drive_index` requests don't contend for
+            // SQLite's write lock.
+            let active_index_for_worker = app.state::<AppState>().active_index.clone();
+            indexer_worker::spawn(
+                db_path_for_worker.clone(),
+                app.handle().clone(),
+                index_rx,
+                active_index_for_worker,
+            );
+
+            // Per-drive startup behavior driven by `DriveSyncMode`:
+            //   Auto  → realtime watcher; auto-enqueue if last scan incomplete
+            //   Timed → realtime watcher; spawn periodic-rescan timer thread
+            //   Manual → no automatic activity at all
+            //
+            // The watcher and timer share a single per-drive stop flag stored
+            // in `journal_watchers` so `toggle_drive_index(false)` stops both.
+            {
+                use indexer_worker::IndexCommand;
+                use settings::DriveSyncMode;
+                let state: tauri::State<AppState> = app.state();
+
+                // Defensive: a drive marked `fully_scanned` but whose
+                // folder_stats row is missing is lying — the earlier
+                // global-wipe `compute_all` bug could leave drives in this
+                // zombie state. Drop the stale flag so the Auto branch
+                // below re-enqueues it.
+                {
+                    let mut cfg = settings::load();
+                    let conn = state.db_lock();
+                    let before = cfg.fully_scanned_drives.len();
+                    cfg.fully_scanned_drives.retain(|d| {
+                        let trimmed = d.replace('\\', "/");
+                        let trimmed = trimmed.trim_end_matches('/');
+                        let has_stats: bool = conn
+                            .query_row(
+                                "SELECT 1 FROM folder_stats fs
+                                 JOIN files f ON f.id = fs.folder_id
+                                 WHERE f.path = ?1 LIMIT 1",
+                                [trimmed],
+                                |_| Ok(true),
+                            )
+                            .unwrap_or(false);
+                        if !has_stats {
+                            eprintln!("Startup: clearing stale fully_scanned flag for {}", d);
+                        }
+                        has_stats
+                    });
+                    if cfg.fully_scanned_drives.len() != before {
+                        drop(conn);
+                        let _ = settings::save(&cfg);
+                    }
+                }
+
+                let cfg = settings::load();
+                let sender = state
+                    .index_tx
+                    .lock()
+                    .expect("index_tx poisoned")
+                    .clone();
+                for drive in &cfg.indexed_drives {
+                    let normalized = drive.replace('\\', "/");
+                    let mode = settings::sync_mode_for(&cfg, &normalized);
+
+                    if matches!(mode, DriveSyncMode::Manual) {
+                        // No background activity; user-driven Rescan only.
+                        continue;
+                    }
+
+                    // One stop flag drives both the realtime watcher and any
+                    // periodic timer for this drive.
+                    let drive_stop = Arc::new(AtomicBool::new(false));
+                    if let Ok(mut map) = watchers_for_startup.lock() {
+                        if let Some(prev) = map.insert(normalized.clone(), drive_stop.clone()) {
+                            prev.store(true, Ordering::Relaxed);
+                        }
+                    }
+
+                    drive_watcher::spawn(
+                        db_path_for_startup.clone(),
+                        normalized.clone(),
+                        drive_stop.clone(),
+                        app.handle().clone(),
+                    );
+
+                    if matches!(mode, DriveSyncMode::Auto) {
+                        let complete = cfg
+                            .fully_scanned_drives
+                            .iter()
+                            .any(|d| d.replace('\\', "/") == normalized);
+                        if !complete {
+                            eprintln!("Auto-enqueue: {} (mode=auto, not fully scanned)", drive);
+                            let cancel = Arc::new(AtomicBool::new(false));
+                            if let Ok(mut map) = state.index_cancel_flags.lock() {
+                                map.insert(normalized.clone(), cancel.clone());
+                            }
+                            let _ = sender.send(IndexCommand::Enqueue {
+                                drive: normalized.clone(),
+                                cancel,
+                            });
+                        }
+                    }
+
+                    if let DriveSyncMode::Timed { interval_minutes } = mode {
+                        let interval = std::time::Duration::from_secs(
+                            (interval_minutes.max(1) as u64) * 60,
+                        );
+                        let stop_for_timer = drive_stop.clone();
+                        let sender_for_timer = sender.clone();
+                        let drive_for_timer = normalized.clone();
+                        std::thread::spawn(move || {
+                            const TICK: std::time::Duration = std::time::Duration::from_secs(1);
+                            loop {
+                                let mut waited = std::time::Duration::ZERO;
+                                while waited < interval {
+                                    if stop_for_timer.load(Ordering::Relaxed) {
+                                        return;
+                                    }
+                                    std::thread::sleep(TICK);
+                                    waited += TICK;
+                                }
+                                let cancel = Arc::new(AtomicBool::new(false));
+                                let _ = sender_for_timer.send(IndexCommand::Enqueue {
+                                    drive: drive_for_timer.clone(),
+                                    cancel,
+                                });
+                            }
+                        });
+                    }
+                }
+            }
 
             Ok(())
         })
@@ -77,6 +248,7 @@ pub fn run() {
             commands::navigate_to,
             commands::get_drives,
             commands::search_files,
+            commands::search_subtree_counts,
             commands::get_folder_stats,
             commands::get_folder_sizes,
             commands::open_file,
@@ -92,6 +264,16 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::get_index_status,
+            commands::get_indexing_state,
+            commands::set_drive_sync_mode,
+            commands::rescan_drive,
+            commands::install_shell_integration,
+            commands::uninstall_shell_integration,
+            commands::is_shell_integration_installed,
+            commands::take_pending_open_path,
+            commands::hide_launcher,
+            commands::launcher_navigate,
+            commands::download_and_run_installer,
             commands::start_index,
             commands::remove_index,
             commands::toggle_drive_index,
@@ -116,85 +298,3 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn start_journal_watchers(
-    db_path: &PathBuf,
-    app_handle: tauri::AppHandle,
-    watchers: JournalWatchers,
-) {
-    use tauri::Emitter;
-
-    let cfg = settings::load();
-    if cfg.indexed_drives.is_empty() {
-        eprintln!("Journal watcher: no drives enabled");
-        return;
-    }
-
-    // Check if each drive has existing index data (has a checkpoint)
-    if let Ok(conn) = chimaera_indexer::db::open(db_path) {
-        for drive in &cfg.indexed_drives {
-            let has_data: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) > 0 FROM files WHERE path = ?1 OR path LIKE ?1 || '%' LIMIT 1",
-                    [drive],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false);
-
-            if !has_data {
-                // No index data — do a full scan first
-                eprintln!("Journal watcher: {} has no index data, running initial scan...", drive);
-                let target = std::path::PathBuf::from(drive);
-                if target.exists() {
-                    match chimaera_indexer::walker::index_directory(&conn, &target) {
-                        Ok(stats) => {
-                            eprintln!("Journal watcher: {} initial scan complete — {} files, {} dirs",
-                                drive, stats.files_inserted, stats.dirs_inserted);
-                            let _ = chimaera_indexer::stats::compute_all(&conn);
-                            let _ = chimaera_indexer::fts::populate(&conn);
-                        }
-                        Err(e) => {
-                            eprintln!("Journal watcher: {} initial scan failed: {}", drive, e);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Spawn a journal watcher thread for each enabled drive
-    for drive in cfg.indexed_drives {
-        let db = db_path.clone();
-        let app = app_handle.clone();
-        let drive_clone = drive.clone();
-
-        let stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-        // If a watcher is already registered for this drive (e.g. from a prior
-        // enable), signal it to stop before replacing the entry.
-        if let Ok(mut map) = watchers.lock() {
-            if let Some(prev) = map.insert(drive.clone(), stop.clone()) {
-                prev.store(true, Ordering::Relaxed);
-            }
-        }
-        let stop_for_thread = stop.clone();
-
-        std::thread::spawn(move || {
-            let app_for_cb = app.clone();
-            let drive_for_cb = drive_clone.clone();
-
-            chimaera_indexer::journal_watcher::run_watcher(
-                &db,
-                &drive_clone,
-                Some(Box::new(move |num_changes| {
-                    let _ = app_for_cb.emit(
-                        "index-updated",
-                        serde_json::json!({
-                            "volume": drive_for_cb,
-                            "changes": num_changes,
-                        }),
-                    );
-                })),
-                stop_for_thread,
-            );
-        });
-    }
-}

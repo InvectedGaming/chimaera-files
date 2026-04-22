@@ -3,8 +3,21 @@ use rusqlite::{params, Connection};
 use std::time::SystemTime;
 
 /// Compute folder_stats for every directory in the index.
-/// Uses a bottom-up approach: process deepest folders first, then propagate up.
+/// Wipes ALL existing folder_stats and recomputes globally — only safe to
+/// call when the entire index has been freshly populated. For per-drive
+/// recomputation after a single-drive scan, use [`compute_for_subtree`].
 pub fn compute_all(conn: &Connection) -> rusqlite::Result<()> {
+    compute_inner(conn, None)
+}
+
+/// Compute folder_stats for directories under `root_path` only. Leaves
+/// folder_stats for other subtrees untouched — important when a single
+/// drive completes a scan while other drives' stats are still valid.
+pub fn compute_for_subtree(conn: &Connection, root_path: &str) -> rusqlite::Result<()> {
+    compute_inner(conn, Some(root_path))
+}
+
+fn compute_inner(conn: &Connection, root_path: Option<&str>) -> rusqlite::Result<()> {
     let now_ms = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
@@ -12,18 +25,48 @@ pub fn compute_all(conn: &Connection) -> rusqlite::Result<()> {
 
     // Ensure no leftover transactions
     let _ = conn.execute_batch("COMMIT");
-    conn.execute("DELETE FROM folder_stats", [])?;
 
-    // Get all directories ordered by path length descending (deepest first).
-    // This ensures children are processed before parents.
-    let mut dir_stmt = conn.prepare(
-        "SELECT id, path FROM files WHERE is_directory = 1 ORDER BY LENGTH(path) DESC",
-    )?;
+    // Trim a trailing `/` so the LIKE prefix doesn't end up as `C://%`,
+    // which silently matches no rows (the walker stores paths with a
+    // single slash separator).
+    let root_trimmed: Option<String> =
+        root_path.map(|p| p.trim_end_matches('/').to_string());
 
-    let dirs: Vec<(i64, String)> = dir_stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
+    // Wipe stats for the targeted subtree (or all of folder_stats if global).
+    if let Some(root) = &root_trimmed {
+        let prefix_like = format!("{}/%", root);
+        conn.execute(
+            "DELETE FROM folder_stats WHERE folder_id IN (
+                 SELECT id FROM files WHERE path = ?1 OR path LIKE ?2
+             )",
+            [root.as_str(), prefix_like.as_str()],
+        )?;
+    } else {
+        conn.execute("DELETE FROM folder_stats", [])?;
+    }
+
+    // Pull directories scoped to the root (deepest first, so children are
+    // processed before their parents — required for the bottom-up rollup).
+    let dirs: Vec<(i64, String)> = if let Some(root) = &root_trimmed {
+        let prefix_like = format!("{}/%", root);
+        let mut s = conn.prepare(
+            "SELECT id, path FROM files
+             WHERE is_directory = 1 AND (path = ?1 OR path LIKE ?2)
+             ORDER BY LENGTH(path) DESC",
+        )?;
+        s.query_map([root.as_str(), prefix_like.as_str()], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+            .filter_map(|r| r.ok())
+            .collect()
+    } else {
+        let mut s = conn.prepare(
+            "SELECT id, path FROM files WHERE is_directory = 1 ORDER BY LENGTH(path) DESC",
+        )?;
+        s.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect()
+    };
 
     let mut insert_stmt = conn.prepare_cached(
         "INSERT INTO folder_stats (folder_id, total_size, file_count, direct_file_count, subfolder_count, deepest_file_depth, last_modified, computed_at)

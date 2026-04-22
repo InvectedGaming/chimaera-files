@@ -1,5 +1,48 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// How a drive's index is kept in sync with the filesystem.
+///
+/// All modes are independent of the `enabled` flag — disabling a drive
+/// drops it from the index entirely regardless of mode.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum DriveSyncMode {
+    /// Realtime watcher + auto-rescan on incomplete startup. Default.
+    Auto,
+    /// No automatic activity. User triggers rescans via the Rescan button.
+    /// The realtime fs watcher is also off — the index drifts from disk
+    /// reality until the next manual scan.
+    Manual,
+    /// Realtime watcher + scheduled full rescan every N minutes.
+    Timed { interval_minutes: u32 },
+}
+
+impl Default for DriveSyncMode {
+    fn default() -> Self {
+        DriveSyncMode::Auto
+    }
+}
+
+/// Which channel the auto-updater follows.
+///
+///   Stable  — tagged releases from the main branch. Recommended.
+///   Beta    — pre-release tagged builds.
+///   Dev     — HEAD of the main branch, auto-built by CI on every commit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    Stable,
+    Beta,
+    Dev,
+}
+
+impl Default for UpdateChannel {
+    fn default() -> Self {
+        UpdateChannel::Stable
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -10,6 +53,20 @@ pub struct Settings {
     pub animations_enabled: bool,
     #[serde(default)]
     pub indexed_drives: Vec<String>,
+    /// Drives whose most recent scan ran to completion. Used at startup to
+    /// auto-requeue drives that were interrupted (app killed mid-scan,
+    /// cancelled, errored). A drive in `indexed_drives` but not here is
+    /// considered "incomplete" and gets rescanned on next launch.
+    #[serde(default)]
+    pub fully_scanned_drives: Vec<String>,
+    /// Sync mode per drive (forward-slash form). Drives without an entry
+    /// fall back to `DriveSyncMode::default()` (Auto).
+    #[serde(default)]
+    pub drive_sync_modes: HashMap<String, DriveSyncMode>,
+    #[serde(default)]
+    pub update_channel: UpdateChannel,
+    #[serde(default = "default_true")]
+    pub update_auto_check: bool,
 }
 
 fn default_true() -> bool { true }
@@ -25,7 +82,41 @@ impl Default for Settings {
             confirm_delete: true,
             animations_enabled: true,
             indexed_drives: Vec::new(),
+            fully_scanned_drives: Vec::new(),
+            drive_sync_modes: HashMap::new(),
+            update_channel: UpdateChannel::Stable,
+            update_auto_check: true,
         }
+    }
+}
+
+/// Look up a drive's sync mode (defaults to Auto if no entry).
+pub fn sync_mode_for(cfg: &Settings, drive: &str) -> DriveSyncMode {
+    let key = drive.replace('\\', "/");
+    cfg.drive_sync_modes
+        .get(&key)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Mark a drive as having completed a full scan.
+pub fn mark_scan_complete(drive: &str) {
+    let mut cfg = load();
+    let d = drive.replace('\\', "/");
+    if !cfg.fully_scanned_drives.iter().any(|x| x.replace('\\', "/") == d) {
+        cfg.fully_scanned_drives.push(d);
+        let _ = save(&cfg);
+    }
+}
+
+/// Remove a drive from the fully-scanned set (scan is starting over or failed).
+pub fn unmark_scan_complete(drive: &str) {
+    let mut cfg = load();
+    let d = drive.replace('\\', "/");
+    let before = cfg.fully_scanned_drives.len();
+    cfg.fully_scanned_drives.retain(|x| x.replace('\\', "/") != d);
+    if cfg.fully_scanned_drives.len() != before {
+        let _ = save(&cfg);
     }
 }
 

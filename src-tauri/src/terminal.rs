@@ -79,9 +79,9 @@ impl TerminalManager {
         session.writer.write_all(data).map_err(|e| e.to_string())
     }
 
-    pub fn resize(&mut self, id: TerminalId, cols: u16, rows: u16) -> Result<(), String> {
-        // portable-pty doesn't expose resize on the session after creation
-        // This is a known limitation — resize would need the master handle
+    pub fn resize(&mut self, _id: TerminalId, _cols: u16, _rows: u16) -> Result<(), String> {
+        // TODO: no-op — resize needs the MasterPty, which we currently drop
+        // after `take_writer`. Storing it would let us call master.resize().
         Ok(())
     }
 

@@ -42,6 +42,19 @@ export async function searchFiles(
   return invoke("search_files", { query, limit });
 }
 
+export type MatchMode = "substring" | "fuzzy" | "regex";
+
+/// Count matches per direct-child folder of `parentPath`. Drives the "+N"
+/// badges on folder rows during type-ahead. Returns an empty record when
+/// the drive isn't indexed or the query is empty.
+export async function searchSubtreeCounts(
+  query: string,
+  parentPath: string,
+  mode?: MatchMode,
+): Promise<Record<string, number>> {
+  return invoke("search_subtree_counts", { query, parentPath, mode });
+}
+
 export async function getFolderStats(
   path: string,
 ): Promise<FolderStats | null> {
@@ -80,11 +93,15 @@ export async function unwatchDirectory(): Promise<void> {
 
 // --- Settings ---
 
+export type UpdateChannel = "stable" | "beta" | "dev";
+
 export interface Settings {
   default_path: string;
   show_hidden_files: boolean;
   confirm_delete: boolean;
   animations_enabled: boolean;
+  update_channel: UpdateChannel;
+  update_auto_check: boolean;
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -107,6 +124,10 @@ export interface DriveIndexInfo {
   last_indexed: number | null;
   drive_total_bytes: number;
   drive_free_bytes: number;
+  /** File count from the most recent fully-completed scan, or null if the
+   *  drive has never finished one. Used as the denominator in "X of Y". */
+  baseline_file_count: number | null;
+  sync_mode: DriveSyncMode;
 }
 
 export interface IndexStatus {
@@ -120,11 +141,63 @@ export async function getIndexStatus(): Promise<IndexStatus> {
   return invoke("get_index_status");
 }
 
+export interface ActiveIndexProgress {
+  drive: string;
+  phase: "queued" | "scanning" | "computing_stats";
+  files: number;
+  dirs: number;
+  bytes: number;
+  position: number | null;
+}
+
+/** Snapshot of drives currently being indexed. Used by Settings on mount to
+ *  catch up to in-flight work that started before the page was opened. */
+export async function getIndexingState(): Promise<ActiveIndexProgress[]> {
+  return invoke("get_indexing_state");
+}
+
 export async function toggleDriveIndex(
   drive: string,
   enabled: boolean,
 ): Promise<string> {
   return invoke("toggle_drive_index", { drive, enabled });
+}
+
+export type DriveSyncMode =
+  | { kind: "auto" }
+  | { kind: "manual" }
+  | { kind: "timed"; interval_minutes: number };
+
+export async function setDriveSyncMode(
+  drive: string,
+  mode: DriveSyncMode,
+): Promise<void> {
+  return invoke("set_drive_sync_mode", { drive, mode });
+}
+
+/** Trigger a fresh full scan immediately. Goes through the worker queue. */
+export async function rescanDrive(drive: string): Promise<string> {
+  return invoke("rescan_drive", { drive });
+}
+
+// --- Shell integration ---
+
+export async function installShellIntegration(): Promise<void> {
+  return invoke("install_shell_integration");
+}
+
+export async function uninstallShellIntegration(): Promise<void> {
+  return invoke("uninstall_shell_integration");
+}
+
+export async function isShellIntegrationInstalled(): Promise<boolean> {
+  return invoke("is_shell_integration_installed");
+}
+
+/** Returns the path the app was launched to open (from a double-click /
+ *  right-click verb). One-shot: subsequent calls return null. */
+export async function takePendingOpenPath(): Promise<string | null> {
+  return invoke("take_pending_open_path");
 }
 
 export async function startIndex(path: string): Promise<string> {

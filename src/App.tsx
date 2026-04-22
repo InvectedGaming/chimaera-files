@@ -13,16 +13,21 @@ import { ShortcutsPanel } from "./components/ShortcutsPanel";
 import { DetailsPanel } from "./components/DetailsPanel";
 import { useFileNavigation } from "./hooks/useFileNavigation";
 import { AnimationsContext } from "./hooks/useAnimations";
+import { listen } from "@tauri-apps/api/event";
 import {
   searchFiles,
+  searchSubtreeCounts,
   getHomeDir,
   getSettings,
   deleteFiles,
   renameFile,
   undoLastOperation,
   createFolder,
+  takePendingOpenPath,
   type FileItem,
+  type MatchMode,
 } from "./api";
+import { nameMatches, nextMode, modeLabel } from "./utils/match";
 
 let tabIdCounter = 1;
 
@@ -123,6 +128,21 @@ function App() {
     [nav],
   );
 
+  // Honour launch-time path (shell integration / second-instance args).
+  // Runs once on mount; second-instance emits `open-path` events that we
+  // subscribe to below.
+  useEffect(() => {
+    takePendingOpenPath().then((p) => {
+      if (p) handleNavigate(p);
+    });
+    const unlisten = listen<string>("open-path", (ev) => {
+      if (ev.payload) handleNavigate(ev.payload);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [handleNavigate]);
+
   const handleNewTab = useCallback(async () => {
     const home = await getHomeDir();
     const id = `tab-${tabIdCounter++}`;
@@ -217,6 +237,17 @@ function App() {
   const typeAheadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [typeAheadDisplay, setTypeAheadDisplay] = useState<string | null>(null);
   const [typeAheadExitCount, setTypeAheadExitCount] = useState(0); // 0=normal, 1-3=countdown to exit
+  const [matchMode, setMatchMode] = useState<MatchMode>(() => {
+    const saved = localStorage.getItem("chimaera-match-mode");
+    return (saved === "substring" || saved === "fuzzy" || saved === "regex") ? saved : "substring";
+  });
+  const matchModeRef = useRef(matchMode);
+  matchModeRef.current = matchMode;
+  useEffect(() => {
+    localStorage.setItem("chimaera-match-mode", matchMode);
+  }, [matchMode]);
+  const [subtreeCounts, setSubtreeCounts] = useState<Record<string, number>>({});
+  const subtreeCountsReqRef = useRef(0);
 
   // Arrow key navigation state
   const arrowThrottleRef = useRef(0);
@@ -317,6 +348,28 @@ function App() {
     return () => window.removeEventListener("preview-cycle", handler);
   }, []);
 
+  // Fetch subtree match counts while type-ahead is active. Debounced so
+  // fast typing doesn't flood the indexer; result is keyed by a request
+  // id so an out-of-order response can't overwrite a newer query.
+  useEffect(() => {
+    const query = typeAheadDisplay ?? "";
+    const folder = nav.currentPath;
+    if (!query || !folder || folder === "drives://" || matchMode === "regex") {
+      setSubtreeCounts({});
+      return;
+    }
+    const reqId = ++subtreeCountsReqRef.current;
+    const handle = setTimeout(async () => {
+      try {
+        const counts = await searchSubtreeCounts(query, folder, matchMode);
+        if (reqId === subtreeCountsReqRef.current) setSubtreeCounts(counts);
+      } catch {
+        if (reqId === subtreeCountsReqRef.current) setSubtreeCounts({});
+      }
+    }, 120);
+    return () => clearTimeout(handle);
+  }, [typeAheadDisplay, nav.currentPath, matchMode]);
+
   // Load animations setting
   useEffect(() => {
     getSettings().then((s) => setAnimationsEnabled(s.animations_enabled));
@@ -365,6 +418,31 @@ function App() {
           return;
         }
 
+        // Tab: cycle search mode (smart → fuzzy → regex → smart)
+        if (e.key === "Tab") {
+          e.preventDefault();
+          const next = nextMode(matchModeRef.current);
+          setMatchMode(next);
+          // Re-run match against the current buffer in the new mode
+          const q = typeAheadRef.current === "\x00" ? "" : typeAheadRef.current;
+          if (q) {
+            const match = displayItems.find((i) => nameMatches(i.name, q, next));
+            if (match) {
+              const matchIdx = displayItems.indexOf(match);
+              setSelectedPath(match.path);
+              selectedIndexRef.current = matchIdx;
+              scrollToIndex(matchIdx);
+            }
+          }
+          // Extend the buffer lifetime so the mode chip stays visible
+          if (typeAheadTimerRef.current) clearTimeout(typeAheadTimerRef.current);
+          typeAheadTimerRef.current = setTimeout(() => {
+            typeAheadRef.current = "";
+            setTypeAheadDisplay(null);
+          }, 2500);
+          return;
+        }
+
         // Arrow up/down: cycle through matches
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
           e.preventDefault();
@@ -372,7 +450,7 @@ function App() {
           const currentIdx = selectedIndexRef.current;
           const matches = displayItems
             .map((item, i) => ({ item, i }))
-            .filter(({ item }) => item.name.toLowerCase().includes(query));
+            .filter(({ item }) => nameMatches(item.name, query, matchModeRef.current));
 
           if (matches.length > 0) {
             let next;
@@ -437,7 +515,7 @@ function App() {
           setTypeAheadDisplay(typeAheadRef.current);
           // Re-match
           const match = displayItems.find((i) =>
-            i.name.toLowerCase().includes(typeAheadRef.current)
+            nameMatches(i.name, typeAheadRef.current, matchModeRef.current)
           );
           if (match) {
             const matchIdx = displayItems.indexOf(match);
@@ -461,9 +539,8 @@ function App() {
           typeAheadRef.current += e.key.toLowerCase();
           setTypeAheadExitCount(0);
           setTypeAheadDisplay(typeAheadRef.current);
-          // Use .includes() instead of .startsWith() for better matching
           const match = displayItems.find((i) =>
-            i.name.toLowerCase().includes(typeAheadRef.current)
+            nameMatches(i.name, typeAheadRef.current, matchModeRef.current)
           );
           if (match) {
             const matchIdx = displayItems.indexOf(match);
@@ -628,9 +705,8 @@ function App() {
         e.preventDefault();
         typeAheadRef.current = e.key.toLowerCase();
         setTypeAheadDisplay(typeAheadRef.current);
-        // Find first match using .includes()
         const match = displayItems.find((i) =>
-          i.name.toLowerCase().includes(typeAheadRef.current)
+          nameMatches(i.name, typeAheadRef.current, matchModeRef.current)
         );
         if (match) {
           const matchIdx = displayItems.indexOf(match);
@@ -859,6 +935,7 @@ function App() {
                 if (result.success) nav.refreshCurrentDir();
               }}
               onCancelRename={() => setRenamingPath(null)}
+              subtreeCounts={subtreeCounts}
             />
             {/* Details panel */}
             {detailsVisible && (
@@ -998,6 +1075,28 @@ function App() {
             {typeAheadExitCount > 0 ? "Exit" : "Search"}:
           </span>
           <span style={{ fontWeight: 500, minWidth: "20px" }}>{typeAheadDisplay}</span>
+          {typeAheadExitCount === 0 && (
+            <span
+              title="Tab to cycle search mode"
+              style={{
+                fontSize: "10px",
+                fontWeight: 600,
+                color: matchMode === "regex" ? "#f0a4ff" : "#60cdff",
+                background:
+                  matchMode === "regex" ? "rgba(240,164,255,0.12)" : "rgba(96,205,255,0.12)",
+                border:
+                  matchMode === "regex"
+                    ? "1px solid rgba(240,164,255,0.25)"
+                    : "1px solid rgba(96,205,255,0.25)",
+                borderRadius: "9px",
+                padding: "1px 6px",
+                letterSpacing: "0.4px",
+                textTransform: "uppercase",
+              }}
+            >
+              {modeLabel(matchMode)}
+            </span>
+          )}
           {typeAheadExitCount > 0 ? (
             <span style={{ display: "flex", gap: "3px", alignItems: "center" }}>
               {[1, 2, 3].map((n) => (

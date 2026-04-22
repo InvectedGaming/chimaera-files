@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "predev": "node -e \"require('fs').rmSync('node_modules/.vite-temp',{recursive:true,force:true})\"",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",

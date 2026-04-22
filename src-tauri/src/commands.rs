@@ -2,9 +2,9 @@ use crate::archive;
 use crate::file_ops;
 use crate::settings;
 use crate::state::AppState;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::PathBuf;
-use tauri::State;
+use tauri::{Manager, State};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FileItem {
@@ -302,6 +302,26 @@ pub fn search_files(
         .collect())
 }
 
+/// Count matches per direct-child folder of `parent_path`.
+/// Powers the "+N" badge on folder rows during type-ahead.
+/// Returns an empty map if the drive isn't indexed or the query is empty.
+#[tauri::command]
+pub fn search_subtree_counts(
+    query: String,
+    parent_path: String,
+    mode: Option<chimaera_indexer::search::MatchMode>,
+    state: State<AppState>,
+) -> Result<std::collections::HashMap<String, u64>, String> {
+    let conn = state.db_lock();
+    chimaera_indexer::search::count_subtree_matches(
+        &conn,
+        &query,
+        &parent_path,
+        mode.unwrap_or_default(),
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Get folder stats from the index.
 #[tauri::command]
 pub fn get_folder_stats(
@@ -517,12 +537,20 @@ pub struct DriveIndexInfo {
     pub drive: String,
     pub label: String,
     pub enabled: bool,
+    /// Live row count in the `files` table for this drive. Reflects whatever
+    /// rows exist right now — partial during a scan, complete after one.
     pub file_count: i64,
     pub dir_count: i64,
     pub total_size: i64,
     pub last_indexed: Option<i64>,
     pub drive_total_bytes: u64,
     pub drive_free_bytes: u64,
+    /// File count recorded by `folder_stats` at the most recent fully
+    /// completed scan. Used as the denominator in "X of Y indexed" labels.
+    /// `None` if the drive has never finished a scan.
+    pub baseline_file_count: Option<i64>,
+    /// How this drive's index is kept in sync. Defaults to `Auto`.
+    pub sync_mode: settings::DriveSyncMode,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -533,18 +561,200 @@ pub struct IndexStatus {
     pub drives: Vec<DriveIndexInfo>,
 }
 
+/// Update a drive's sync mode (auto / manual / timed).
+/// Lifecycle changes (timer start/stop, watcher start/stop) are handled on
+/// next app launch — the new mode persists immediately.
+#[tauri::command]
+pub fn set_drive_sync_mode(
+    drive: String,
+    mode: settings::DriveSyncMode,
+) -> Result<(), String> {
+    let mut cfg = settings::load();
+    let key = drive.replace('\\', "/");
+    cfg.drive_sync_modes.insert(key, mode);
+    settings::save(&cfg)
+}
+
+/// Trigger a fresh full scan of a drive. Goes through the same serial
+/// worker queue as the auto-rescan path, so it composes correctly with
+/// other in-flight scans.
+#[tauri::command]
+pub fn rescan_drive(drive: String, state: State<AppState>) -> Result<String, String> {
+    use crate::indexer_worker::IndexCommand;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let drive_normalized = drive.replace('\\', "/");
+
+    // Fresh cancel flag — replace any prior one for this drive (which would
+    // have belonged to a completed scan and is no longer useful).
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Ok(mut map) = state.index_cancel_flags.lock() {
+        if let Some(prev) = map.insert(drive_normalized.clone(), cancel.clone()) {
+            // Stop any in-flight scan for this drive before starting a new one.
+            prev.store(true, Ordering::Relaxed);
+        }
+    }
+
+    // Drop the "fully scanned" flag — a fresh scan is starting.
+    settings::unmark_scan_complete(&drive_normalized);
+
+    state
+        .index_tx
+        .lock()
+        .map_err(|_| "index channel lock poisoned".to_string())?
+        .send(IndexCommand::Enqueue {
+            drive: drive_normalized.clone(),
+            cancel,
+        })
+        .map_err(|_| "indexer worker has stopped".to_string())?;
+
+    Ok(format!("Rescan queued for {}", drive))
+}
+
+/// Download an installer to `%TEMP%` and spawn it, then exit the current
+/// app so the installer can overwrite the running binary. `installer_name`
+/// is used as the temp filename (e.g. `"chimaera-setup.exe"`).
+///
+/// Uses bundled `curl.exe` (shipped with Windows 10 1803+) to avoid pulling
+/// in an HTTP client crate just for this. No cryptographic signature check —
+/// by default Windows SmartScreen / UAC is the gate.
+#[tauri::command]
+pub async fn download_and_run_installer(
+    url: String,
+    installer_name: String,
+) -> Result<(), String> {
+    use std::process::Command;
+
+    // Sanitize the filename — don't let a malicious manifest drop a file
+    // with path separators in %TEMP%.
+    if installer_name.contains('/')
+        || installer_name.contains('\\')
+        || installer_name.contains("..")
+    {
+        return Err("Invalid installer filename".to_string());
+    }
+
+    let dest = std::env::temp_dir().join(&installer_name);
+
+    // Stream the download; `-L` follows redirects (GitHub's release download
+    // URLs redirect to a CDN), `-f` fails on HTTP errors, `-sS` keeps the
+    // output quiet but still surfaces fatal errors, `-o` writes to disk.
+    let status = Command::new("curl.exe")
+        .args(["-L", "-f", "-sS", "-o"])
+        .arg(&dest)
+        .arg(&url)
+        .status()
+        .map_err(|e| format!("failed to spawn curl: {}", e))?;
+    if !status.success() {
+        return Err(format!("curl exited with status {}", status));
+    }
+
+    // Launch the installer. Per-machine NSIS/MSI installers self-elevate
+    // and show a UAC prompt. Detach so it survives this process exiting.
+    Command::new(&dest)
+        .spawn()
+        .map_err(|e| format!("failed to launch installer: {}", e))?;
+
+    // Give the installer a brief head start before we exit, otherwise
+    // Windows may kill the fresh installer process as our parent dies.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::process::exit(0);
+}
+
+/// Install the "Open in Chimaera" right-click shell integration (HKCU,
+/// no admin needed). On Windows 11 the entry appears under "Show more
+/// options" until we ship an `IExplorerCommand` shell extension.
+#[cfg(windows)]
+#[tauri::command]
+pub fn install_shell_integration() -> Result<(), String> {
+    crate::shell_integration::install().map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+pub fn uninstall_shell_integration() -> Result<(), String> {
+    crate::shell_integration::uninstall().map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+pub fn is_shell_integration_installed() -> bool {
+    crate::shell_integration::is_installed()
+}
+
+// Non-windows stubs so the frontend can call the commands unconditionally.
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn install_shell_integration() -> Result<(), String> {
+    Err("Shell integration is Windows-only".to_string())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn uninstall_shell_integration() -> Result<(), String> {
+    Err("Shell integration is Windows-only".to_string())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn is_shell_integration_installed() -> bool {
+    false
+}
+
+/// If the app was invoked from the shell with a path argument (e.g.
+/// `"C:\foo" "bar"`), this returns that path once and clears it — the
+/// frontend calls it on mount to honour the launch target.
+#[tauri::command]
+pub fn take_pending_open_path(state: State<AppState>) -> Option<String> {
+    let mut guard = state.pending_open_path.lock().ok()?;
+    guard.take()
+}
+
+/// Hide the launcher popup. Called from the launcher on Esc / blur.
+#[tauri::command]
+pub fn hide_launcher(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("launcher") {
+        let _ = w.hide();
+    }
+}
+
+/// Hide the launcher and navigate the main window to `path`.
+/// Used when the user picks a folder from the launcher.
+#[tauri::command]
+pub fn launcher_navigate(path: String, app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+    if let Some(lw) = app.get_webview_window("launcher") {
+        let _ = lw.hide();
+    }
+    if let Some(mw) = app.get_webview_window("main") {
+        let _ = mw.show();
+        let _ = mw.set_focus();
+        app.emit("open-path", path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Snapshot of drives whose scans are in-flight (queued / scanning /
+/// computing_stats). Terminal-phase drives are not included. Used by the
+/// Settings UI on mount to display the current state without having to
+/// catch the original `"index-progress"` events.
+#[tauri::command]
+pub fn get_indexing_state(
+    state: State<AppState>,
+) -> Result<Vec<crate::state::ActiveIndexProgress>, String> {
+    let guard = state
+        .active_index
+        .lock()
+        .map_err(|_| "active_index lock poisoned".to_string())?;
+    Ok(guard.values().cloned().collect())
+}
+
 /// Get index status per drive.
 #[tauri::command]
 pub fn get_index_status(state: State<AppState>) -> Result<IndexStatus, String> {
     let conn = state.db_lock();
     let cfg = settings::load();
-
-    let total_files: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files WHERE is_directory = 0", [], |r| r.get(0))
-        .unwrap_or(0);
-    let total_dirs: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files WHERE is_directory = 1", [], |r| r.get(0))
-        .unwrap_or(0);
 
     let db_path = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -559,33 +769,39 @@ pub fn get_index_status(state: State<AppState>) -> Result<IndexStatus, String> {
     for drv in &all_drives {
         let mount_fwd = drv.mount_point.replace('\\', "/");
         let enabled = cfg.indexed_drives.iter().any(|d| d.replace('\\', "/") == mount_fwd);
+        // The walker canonicalizes drive roots and stores them WITHOUT a
+        // trailing slash (e.g. `"C:"` not `"C:/"`), so we have to look up
+        // by the trimmed form. This bit me — see git log.
+        let prefix_trimmed = mount_fwd.trim_end_matches('/').to_string();
 
-        // Query file/dir counts and size directly from files table
-        let prefix = &mount_fwd;
-        let (file_count, dir_count, total_size) = conn
+        // Pull the per-drive aggregate from folder_stats (one indexed lookup
+        // per drive — was an O(N) SUM over the files table, which is
+        // multi-second on a 700k-row index).
+        let stats: (i64, i64, i64, i64, Option<i64>) = conn
             .query_row(
                 "SELECT
-                    COALESCE(SUM(CASE WHEN is_directory = 0 THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN is_directory = 1 THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN is_directory = 0 THEN size ELSE 0 END), 0)
-                 FROM files
-                 WHERE path = ?1 OR path LIKE ?1 || '%'",
-                [prefix],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap_or((0i64, 0i64, 0i64));
-
-        // Get last indexed time from folder_stats for the root
-        let last_indexed: Option<i64> = conn
-            .query_row(
-                "SELECT fs.computed_at FROM folder_stats fs
+                    fs.file_count,
+                    fs.subfolder_count,
+                    fs.total_size,
+                    fs.file_count,
+                    fs.computed_at
+                 FROM folder_stats fs
                  JOIN files f ON f.id = fs.folder_id
                  WHERE f.path = ?1",
-                [prefix],
-                |row| row.get(0),
+                [&prefix_trimmed],
+                |row| Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                )),
             )
-            .ok();
+            .unwrap_or((0, 0, 0, 0, None));
+        let (file_count, dir_count, total_size, baseline, last_indexed) = stats;
+        let baseline_file_count = if baseline > 0 { Some(baseline) } else { None };
 
+        let sync_mode = settings::sync_mode_for(&cfg, &mount_fwd);
         drives.push(DriveIndexInfo {
             drive: mount_fwd,
             label: drv.label.clone(),
@@ -596,8 +812,15 @@ pub fn get_index_status(state: State<AppState>) -> Result<IndexStatus, String> {
             last_indexed,
             drive_total_bytes: drv.total_space,
             drive_free_bytes: drv.free_space,
+            baseline_file_count,
+            sync_mode,
         });
     }
+
+    // Roll up totals from per-drive numbers — much faster than COUNT(*)
+    // over the whole files table, which is multi-second on a large index.
+    let total_files: i64 = drives.iter().map(|d| d.file_count).sum();
+    let total_dirs: i64 = drives.iter().map(|d| d.dir_count).sum();
 
     Ok(IndexStatus {
         total_files,
@@ -608,8 +831,12 @@ pub fn get_index_status(state: State<AppState>) -> Result<IndexStatus, String> {
 }
 
 /// Toggle a drive's indexing on or off.
-/// If enabling, spawns indexing on a background thread and returns immediately.
-/// Progress is reported via "index-progress" events.
+///
+/// Enabling queues the drive on the serial indexer worker — the command
+/// returns immediately and the worker emits `"index-progress"` events as
+/// it picks up the job. Disabling flips the per-drive cancel flag (which
+/// stops either a queued or an in-flight scan) and removes the drive's
+/// existing rows from the DB.
 #[tauri::command]
 pub async fn toggle_drive_index(
     drive: String,
@@ -617,85 +844,81 @@ pub async fn toggle_drive_index(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    use tauri::Emitter;
+    use crate::indexer_worker::IndexCommand;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
-    // Update settings
+    // Update settings. Any toggle resets the fully-scanned flag for this
+    // drive — either the scan is starting over (enable) or the drive is
+    // leaving the index (disable).
     let mut cfg = settings::load();
     let drive_normalized = drive.replace('\\', "/");
     cfg.indexed_drives.retain(|d| d.replace('\\', "/") != drive_normalized);
+    cfg.fully_scanned_drives.retain(|d| d.replace('\\', "/") != drive_normalized);
     if enabled {
         cfg.indexed_drives.push(drive_normalized.clone());
     }
     settings::save(&cfg)?;
 
     if enabled {
-        // Spawn indexing in background — use a separate DB connection
+        // Build a fresh cancel flag and hand a clone to the worker. We
+        // keep the original on `state` so a later disable can flip it.
+        let cancel = Arc::new(AtomicBool::new(false));
+        if let Ok(mut map) = state.index_cancel_flags.lock() {
+            // If we're re-enabling a drive that was previously queued,
+            // replace the old flag (the old job is either done or will
+            // see its old flag and exit harmlessly).
+            map.insert(drive_normalized.clone(), cancel.clone());
+        }
+        state
+            .index_tx
+            .lock()
+            .map_err(|_| "index channel lock poisoned".to_string())?
+            .send(IndexCommand::Enqueue {
+                drive: drive_normalized.clone(),
+                cancel,
+            })
+            .map_err(|_| "indexer worker has stopped".to_string())?;
+
+        // Also start the realtime drive watcher so file changes made
+        // during or after the scan patch the index immediately.
+        let watcher_stop = Arc::new(AtomicBool::new(false));
+        if let Ok(mut map) = state.journal_watchers.lock() {
+            if let Some(prev) = map.insert(drive_normalized.clone(), watcher_stop.clone()) {
+                prev.store(true, Ordering::Relaxed);
+            }
+        }
         let db_path = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("chimaera-files")
             .join("index.db");
-        let drive_clone = drive_normalized.clone();
+        crate::drive_watcher::spawn(
+            db_path,
+            drive_normalized.clone(),
+            watcher_stop,
+            app.clone(),
+        );
 
-        std::thread::spawn(move || {
-            let Ok(conn) = chimaera_indexer::db::open(&db_path) else {
-                let _ = app.emit("index-progress", serde_json::json!({
-                    "drive": drive_clone, "files": 0, "dirs": 0, "phase": "error",
-                    "message": "Failed to open database",
-                }));
-                return;
-            };
-
-            let target = std::path::PathBuf::from(&drive_clone);
-            let drive_for_cb = drive_clone.clone();
-            let app_for_cb = app.clone();
-
-            let result = chimaera_indexer::walker::index_directory_with_progress(
-                &conn,
-                &target,
-                Some(Box::new(move |files, dirs| {
-                    let _ = app_for_cb.emit("index-progress", serde_json::json!({
-                        "drive": drive_for_cb,
-                        "files": files,
-                        "dirs": dirs,
-                        "phase": "scanning",
-                    }));
-                })),
-            );
-
-            match result {
-                Ok(stats) => {
-                    let _ = app.emit("index-progress", serde_json::json!({
-                        "drive": drive_clone,
-                        "files": stats.files_inserted,
-                        "dirs": stats.dirs_inserted,
-                        "phase": "computing_stats",
-                    }));
-
-                    let _ = chimaera_indexer::stats::compute_all(&conn);
-                    let _ = chimaera_indexer::fts::populate(&conn);
-
-                    let _ = app.emit("index-progress", serde_json::json!({
-                        "drive": drive_clone,
-                        "files": stats.files_inserted,
-                        "dirs": stats.dirs_inserted,
-                        "phase": "done",
-                    }));
-                }
-                Err(e) => {
-                    let _ = app.emit("index-progress", serde_json::json!({
-                        "drive": drive_clone, "files": 0, "dirs": 0, "phase": "error",
-                        "message": e.to_string(),
-                    }));
-                }
-            }
-        });
-
-        Ok(format!("Indexing started for {}", drive))
+        Ok(format!("Indexing queued for {}", drive))
     } else {
-        // Signal the journal watcher thread to exit before tearing down its data
+        // 1) Signal any running / queued job for this drive to stop.
+        if let Ok(mut map) = state.index_cancel_flags.lock() {
+            if let Some(flag) = map.remove(&drive_normalized) {
+                flag.store(true, Ordering::Relaxed);
+            }
+        }
+        // 2) Tell the worker to drop the entry if it's still queued
+        //    (no-op if it's already running — the cancel flag handles that).
+        if let Ok(tx) = state.index_tx.lock() {
+            let _ = tx.send(IndexCommand::CancelQueued {
+                drive: drive_normalized.clone(),
+            });
+        }
+
+        // 3) Signal the journal watcher thread to exit before tearing down its data.
         if let Ok(mut map) = state.journal_watchers.lock() {
             if let Some(stop) = map.remove(&drive_normalized) {
-                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                stop.store(true, Ordering::Relaxed);
             }
         }
 
