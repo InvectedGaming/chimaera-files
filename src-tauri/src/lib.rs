@@ -283,6 +283,7 @@ pub fn run() {
             commands::save_settings,
             commands::get_index_status,
             commands::get_indexing_state,
+            commands::debug_folder_stats,
             commands::set_drive_sync_mode,
             commands::rescan_drive,
             commands::install_shell_integration,

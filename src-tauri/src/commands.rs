@@ -735,6 +735,63 @@ pub fn launcher_navigate(path: String, app: tauri::AppHandle) -> Result<(), Stri
     Ok(())
 }
 
+/// Debug helper: returns a summary of what's actually in `files` and
+/// `folder_stats` per drive root so we can diagnose why the UI shows 0
+/// even after a successful scan.
+#[tauri::command]
+pub fn debug_folder_stats(
+    state: State<AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let conn = state.db_lock();
+    let drives = ["C:", "D:", "E:", "G:"];
+    let mut out = Vec::new();
+    for drive in &drives {
+        let prefix_like = format!("{}/%", drive);
+
+        let root_row: Option<(i64, i32)> = conn
+            .query_row(
+                "SELECT id, is_directory FROM files WHERE path = ?1",
+                [*drive],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        let files_under: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = ?1 OR path LIKE ?2",
+                [*drive, &prefix_like],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let stats_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM folder_stats fs
+                 JOIN files f ON f.id = fs.folder_id
+                 WHERE f.path = ?1 OR f.path LIKE ?2",
+                [*drive, &prefix_like],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let root_stats: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT fs.file_count, fs.total_size FROM folder_stats fs
+                 JOIN files f ON f.id = fs.folder_id
+                 WHERE f.path = ?1",
+                [*drive],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+
+        out.push(serde_json::json!({
+            "drive": drive,
+            "root_files_row": root_row.map(|(id, isdir)| serde_json::json!({"id": id, "is_dir": isdir})),
+            "files_table_count_under_prefix": files_under,
+            "folder_stats_count_under_prefix": stats_rows,
+            "root_folder_stats": root_stats.map(|(fc, sz)| serde_json::json!({"file_count": fc, "total_size": sz})),
+        }));
+    }
+    Ok(out)
+}
+
 /// Snapshot of drives whose scans are in-flight (queued / scanning /
 /// computing_stats). Terminal-phase drives are not included. Used by the
 /// Settings UI on mount to display the current state without having to
