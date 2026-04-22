@@ -888,6 +888,18 @@ pub async fn toggle_drive_index(
                 prev.store(true, Ordering::Relaxed);
             }
         }
+        // Shared pause flag with the worker — flipped during scans so the
+        // watcher's upserts don't contend for the DB lock while the walker
+        // is doing its big DELETE+INSERT sweep.
+        let pause_flag = {
+            let mut map = state
+                .drive_pause_flags
+                .lock()
+                .map_err(|_| "drive_pause_flags poisoned".to_string())?;
+            map.entry(drive_normalized.clone())
+                .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+                .clone()
+        };
         let db_path = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("chimaera-files")
@@ -896,6 +908,7 @@ pub async fn toggle_drive_index(
             db_path,
             drive_normalized.clone(),
             watcher_stop,
+            pause_flag,
             app.clone(),
         );
 

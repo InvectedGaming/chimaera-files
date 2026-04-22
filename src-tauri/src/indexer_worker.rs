@@ -6,7 +6,7 @@
 //! module owns a single worker thread that pulls jobs off an mpsc channel
 //! and runs them one at a time.
 
-use crate::state::{ActiveIndexProgress, ActiveIndexState};
+use crate::state::{ActiveIndexProgress, ActiveIndexState, DrivePauseFlags};
 use serde_json::json;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -37,8 +37,9 @@ pub fn spawn(
     app: AppHandle,
     rx: Receiver<IndexCommand>,
     active: ActiveIndexState,
+    pauses: DrivePauseFlags,
 ) {
-    std::thread::spawn(move || run(db_path, app, rx, active));
+    std::thread::spawn(move || run(db_path, app, rx, active, pauses));
 }
 
 fn run(
@@ -46,8 +47,10 @@ fn run(
     app: AppHandle,
     rx: Receiver<IndexCommand>,
     active: ActiveIndexState,
+    pauses: DrivePauseFlags,
 ) {
     let mut queue: VecDeque<(String, Arc<AtomicBool>)> = VecDeque::new();
+    eprintln!("[worker] started");
 
     loop {
         // Drain any commands that are already waiting — both to seed the
@@ -58,7 +61,10 @@ fn run(
         if queue.is_empty() {
             match rx.recv() {
                 Ok(cmd) => apply_command(cmd, &mut queue),
-                Err(_) => break, // sender dropped → app shutting down
+                Err(_) => {
+                    eprintln!("[worker] channel closed, exiting");
+                    break;
+                }
             }
             continue;
         }
@@ -94,13 +100,31 @@ fn run(
 
         let (drive, cancel) = queue.pop_front().expect("non-empty");
         if cancel.load(Ordering::Relaxed) {
+            eprintln!("[worker] {} cancelled before start, skipping", drive);
             if let Ok(mut map) = active.lock() {
                 map.remove(&drive);
             }
             continue;
         }
 
+        eprintln!("[worker] starting scan for {}", drive);
+
+        // Pause the realtime watcher for this drive — the walker is about
+        // to do a ton of writes and any concurrent upserts from the watcher
+        // would lose the DB write-lock race (cost us an entire day of
+        // debugging the first time).
+        let pause_flag = {
+            let mut map = pauses.lock().expect("drive_pause_flags poisoned");
+            map.entry(drive.clone())
+                .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+                .clone()
+        };
+        pause_flag.store(true, Ordering::Relaxed);
+
         run_job(&db_path, &app, &active, &drive, cancel);
+
+        pause_flag.store(false, Ordering::Relaxed);
+        eprintln!("[worker] finished scan for {}", drive);
     }
 }
 
@@ -170,19 +194,24 @@ fn run_job(
 
     emit("scanning", 0, 0, 0, None);
 
+    eprintln!("[worker] {} opening DB connection", drive);
     let conn = match chimaera_indexer::db::open(db_path) {
         Ok(c) => c,
         Err(e) => {
+            eprintln!("[worker] {} db::open failed: {}", drive, e);
             emit("error", 0, 0, 0, Some(("message", &e.to_string())));
             return;
         }
     };
+    eprintln!("[worker] {} DB opened, checking target", drive);
 
     let target = PathBuf::from(drive);
     if !target.exists() {
+        eprintln!("[worker] {} target does not exist, aborting", drive);
         emit("error", 0, 0, 0, Some(("message", "drive not available")));
         return;
     }
+    eprintln!("[worker] {} target exists, calling walker", drive);
 
     // Progress emitter used from inside the walker callback.
     let app_cb = app.clone();
@@ -207,6 +236,10 @@ fn run_job(
 
     match result {
         Ok(stats) if stats.cancelled => {
+            eprintln!(
+                "[worker] {} walker returned CANCELLED after {} files, {} dirs",
+                drive, stats.files_inserted, stats.dirs_inserted
+            );
             crate::settings::unmark_scan_complete(drive);
             emit(
                 "cancelled",
@@ -217,6 +250,10 @@ fn run_job(
             );
         }
         Ok(stats) => {
+            eprintln!(
+                "[worker] {} walker OK: {} files, {} dirs, {} bytes; computing stats...",
+                drive, stats.files_inserted, stats.dirs_inserted, stats.bytes_indexed
+            );
             emit(
                 "computing_stats",
                 stats.files_inserted,
@@ -224,9 +261,14 @@ fn run_job(
                 stats.bytes_indexed,
                 None,
             );
-            // Per-drive recompute so other drives' folder_stats are preserved.
-            let _ = chimaera_indexer::stats::compute_for_subtree(&conn, drive);
-            let _ = chimaera_indexer::fts::populate(&conn);
+            if let Err(e) = chimaera_indexer::stats::compute_for_subtree(&conn, drive) {
+                eprintln!("[worker] {} compute_for_subtree ERROR: {}", drive, e);
+            } else {
+                eprintln!("[worker] {} folder_stats computed", drive);
+            }
+            if let Err(e) = chimaera_indexer::fts::populate(&conn) {
+                eprintln!("[worker] {} fts::populate ERROR: {}", drive, e);
+            }
             crate::settings::mark_scan_complete(drive);
             emit(
                 "done",
@@ -237,6 +279,7 @@ fn run_job(
             );
         }
         Err(e) => {
+            eprintln!("[worker] {} walker FAILED: {}", drive, e);
             crate::settings::unmark_scan_complete(drive);
             emit("error", 0, 0, 0, Some(("message", &e.to_string())));
         }

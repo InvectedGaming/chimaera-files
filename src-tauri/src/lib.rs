@@ -112,11 +112,13 @@ pub fn run() {
             // so multiple `toggle_drive_index` requests don't contend for
             // SQLite's write lock.
             let active_index_for_worker = app.state::<AppState>().active_index.clone();
+            let pauses_for_worker = app.state::<AppState>().drive_pause_flags.clone();
             indexer_worker::spawn(
                 db_path_for_worker.clone(),
                 app.handle().clone(),
                 index_rx,
                 active_index_for_worker,
+                pauses_for_worker,
             );
 
             // Per-drive startup behavior driven by `DriveSyncMode`:
@@ -193,10 +195,20 @@ pub fn run() {
                         }
                     }
 
+                    // Shared pause flag — the worker flips it true while
+                    // scanning this drive so we don't race for the DB lock.
+                    let pause_flag = {
+                        let mut map = state.drive_pause_flags.lock().expect("pauses poisoned");
+                        map.entry(normalized.clone())
+                            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+                            .clone()
+                    };
+
                     drive_watcher::spawn(
                         db_path_for_startup.clone(),
                         normalized.clone(),
                         drive_stop.clone(),
+                        pause_flag,
                         app.handle().clone(),
                     );
 

@@ -45,9 +45,14 @@ pub fn index_directory_with_progress(
     // Clear existing data for this root path only. The trailing-slash trim
     // is critical: without it, `'C:/' || '/%'` becomes `'C://%'` which
     // matches zero rows, leaving stale descendants in the index forever.
+    //
+    // Both DELETEs run inside a single transaction so the write lock is
+    // held continuously — otherwise the realtime drive_watcher could sneak
+    // a write in between them and perpetually starve us via SQLITE_BUSY.
     let root_trimmed = root_str.trim_end_matches('/').to_string();
     let prefix_like = format!("{}/%", root_trimmed);
     conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    conn.execute_batch("BEGIN IMMEDIATE")?;
     conn.execute(
         "DELETE FROM folder_stats WHERE folder_id IN (
              SELECT id FROM files WHERE path = ?1 OR path LIKE ?2
@@ -58,6 +63,7 @@ pub fn index_directory_with_progress(
         "DELETE FROM files WHERE path = ?1 OR path LIKE ?2",
         [root_trimmed.as_str(), prefix_like.as_str()],
     )?;
+    conn.execute_batch("COMMIT")?;
     conn.execute_batch("PRAGMA foreign_keys = ON")?;
 
     let mut stats = IndexStats {

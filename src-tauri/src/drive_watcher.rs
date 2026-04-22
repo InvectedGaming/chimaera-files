@@ -20,14 +20,18 @@ use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter};
 
 /// Spawn a watcher thread for `drive_root`. Exits cleanly when `stop` flips.
+/// `pause` lets the indexer worker tell us "the walker is writing, don't
+/// touch the DB" — we still drain events from notify so the kernel buffer
+/// doesn't overflow, we just skip the SQL writes until the flag clears.
 pub fn spawn(
     db_path: PathBuf,
     drive_root: String,
     stop: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
     app: AppHandle,
 ) {
     std::thread::spawn(move || {
-        if let Err(e) = run(&db_path, &drive_root, stop, app) {
+        if let Err(e) = run(&db_path, &drive_root, stop, pause, app) {
             eprintln!("drive watcher {}: exited with error: {}", drive_root, e);
         }
     });
@@ -37,6 +41,7 @@ fn run(
     db_path: &Path,
     drive_root: &str,
     stop: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
     app: AppHandle,
 ) -> Result<(), String> {
     // Mirror the channel element type used in `watcher.rs` — the error side
@@ -71,6 +76,13 @@ fn run(
         // Block up to 1s at a time so we can poll the stop flag between batches.
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(Ok(events)) => {
+                // Walker is mid-scan for this drive — drop events rather
+                // than fighting it for the write lock. The walker will
+                // re-insert every row when it finishes, so anything we'd
+                // have written is already in the scan's output.
+                if pause.load(Ordering::Relaxed) {
+                    continue;
+                }
                 let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).collect();
                 if paths.is_empty() {
                     continue;

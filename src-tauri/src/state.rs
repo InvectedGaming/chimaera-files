@@ -27,6 +27,13 @@ pub struct ActiveIndexProgress {
 
 pub type ActiveIndexState = Arc<Mutex<HashMap<String, ActiveIndexProgress>>>;
 
+/// Per-drive "pause watcher writes" flags. Set to `true` by the indexer
+/// worker for the duration of a walker scan on that drive, so the realtime
+/// `drive_watcher` doesn't race the walker for the DB write lock — its
+/// in-flight events would be redundant anyway because the walker is about
+/// to re-insert every row from scratch.
+pub type DrivePauseFlags = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
+
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub watcher: SharedWatcher,
@@ -47,6 +54,9 @@ pub struct AppState {
     /// Path the app was launched to navigate to (from shell integration or
     /// a double-click). Cleared by the first call to `take_pending_open_path`.
     pub pending_open_path: Arc<Mutex<Option<String>>>,
+    /// Pause flags shared with the realtime drive watcher. See
+    /// [`DrivePauseFlags`] for the "why".
+    pub drive_pause_flags: DrivePauseFlags,
 }
 
 impl AppState {
@@ -64,6 +74,7 @@ impl AppState {
             index_cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             active_index: Arc::new(Mutex::new(HashMap::new())),
             pending_open_path: Arc::new(Mutex::new(None)),
+            drive_pause_flags: Arc::new(Mutex::new(HashMap::new())),
         };
         Ok((state, rx))
     }
