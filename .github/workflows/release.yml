@@ -43,7 +43,9 @@ jobs:
         id: find
         shell: pwsh
         run: |
-          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          # Workspace Cargo project: target dir is at the repo root, not
+          # inside src-tauri (where you'd expect for a single-crate app).
+          $exe = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           if (-not $exe) { throw "No NSIS installer produced — check tauri build output" }
           echo "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
           echo "name=$($exe.Name)" >> $env:GITHUB_OUTPUT
