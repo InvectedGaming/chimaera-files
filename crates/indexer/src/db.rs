@@ -16,21 +16,26 @@ const SCHEMA_VERSION: i32 = 2;
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     configure(&conn)?;
-    migrate(&conn)?;
+    let migrated = migrate(&conn)?;
     conn.execute_batch(SCHEMA_SQL)?;
-    // If the migration just dropped files_fts, repopulate from the existing
-    // `files` rows so the index is usable immediately — without this the
-    // user would need to re-scan every drive.
-    let _ = crate::fts::populate(&conn);
+    // Only rebuild the FTS table if migration actually just dropped it.
+    // Re-populating on every `db::open` is extremely wasteful — the worker
+    // opens a fresh connection per job and would re-index 700k+ rows each
+    // time, adding tens of seconds of blocking writes per scan.
+    if migrated {
+        let _ = crate::fts::populate(&conn);
+    }
     Ok(conn)
 }
 
-fn migrate(conn: &Connection) -> Result<()> {
+/// Returns `true` iff the database was just upgraded — so the caller knows
+/// whether follow-up work (like `fts::populate`) is needed.
+fn migrate(conn: &Connection) -> Result<bool> {
     let current: i32 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap_or(0);
     if current >= SCHEMA_VERSION {
-        return Ok(());
+        return Ok(false);
     }
 
     // v1 → v2: drop files_fts so the schema init recreates it with the
@@ -40,7 +45,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
 
     conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION))?;
-    Ok(())
+    Ok(true)
 }
 
 /// Open the database in read-only mode.
