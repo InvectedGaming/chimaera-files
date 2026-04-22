@@ -21,3 +21,6 @@ bun.lockb
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Git worktrees (Claude Code spawns these under .claude/)
+.claude/worktrees/
